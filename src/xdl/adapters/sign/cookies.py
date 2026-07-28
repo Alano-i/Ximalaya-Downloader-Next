@@ -103,14 +103,16 @@ def extract_cookies_from_profile(
     timeout_ms: int = 30000,
     wait_ms: int = 1500,
     visit_home: bool = False,
+    browser: str = "chrome",
 ) -> list[dict]:
-    """短暂启动 Chrome（共用 `~/.xdl/chrome-profile`），读出 ximalaya.com 域 Cookie。
+    """短暂启动浏览器（共用专用 Profile，如 `~/.xdl/chrome-profile`），读出 ximalaya.com 域 Cookie。
 
     返回的 Cookie 形如：
         [{"name": "1&_token", "value": "...", "domain": ".ximalaya.com",
           "path": "/", "httpOnly": True, "secure": True, ...}, ...]
 
     与 `requests` 兼容（用 `name/value` 拼 Cookie 头即可，安全标志由 HTTPS 保障）。
+    `browser` 决定无显式路径时 Playwright 的 channel（chrome / msedge）。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -120,16 +122,16 @@ def extract_cookies_from_profile(
 
     if not os.path.isdir(profile_dir):
         raise FileNotFoundError(
-            f"Chrome Profile 目录不存在: {profile_dir}。请先运行 `xdl login` 创建。")
+            f"浏览器 Profile 目录不存在: {profile_dir}。请先运行 `xdl login` 创建。")
 
     launch_kwargs = dict(
         headless=headless,
         viewport={"width": 1440, "height": 900},
         locale="zh-CN",
         timezone_id="Asia/Shanghai",
-        # 登录 Profile 由系统 Chrome 直接启动并使用系统凭据存储加密 Cookie。
+        # 登录 Profile 由系统浏览器直接启动并使用系统凭据存储加密 Cookie。
         # Playwright 默认追加的这两个参数会改用测试用密码存储；在 macOS 上尤其会让
-        # Chrome 无法解密刚写入的 Keychain Cookie，并在启动时删除对应数据库行。
+        # 浏览器无法解密刚写入的 Keychain Cookie，并在启动时删除对应数据库行。
         ignore_default_args=["--password-store=basic", "--use-mock-keychain"],
         args=[
             "--no-first-run",
@@ -143,7 +145,7 @@ def extract_cookies_from_profile(
     if chrome_path:
         launch_kwargs["executable_path"] = chrome_path
     else:
-        launch_kwargs["channel"] = "chrome"
+        launch_kwargs["channel"] = "msedge" if browser == "edge" else "chrome"
 
     cookies: list[dict] = []
     with sync_playwright() as p:

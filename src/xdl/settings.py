@@ -26,12 +26,16 @@ class Settings:
     resolve_timeout: int = 40       # 解析（捕获 baseInfo）超时（秒）
     http_timeout: int = 60          # 下载超时（秒）
 
-    # 真实 Chrome 接管（见 adapters/source_chrome.py）
-    chrome_path: str = ""           # 为空则自动探测
-    chrome_profile_dir: str = ""    # 专用 Chrome 用户配置目录（持久化登录态）
+    # 浏览器选择（登录/Cookie 导出/设备指纹采集所用的真实浏览器）。
+    # "auto" = Chrome 优先、Edge 兜底；显式 "chrome"/"edge" 只用指定浏览器。
+    browser: str = "auto"
+
+    # 真实浏览器接管（见 adapters/source_chrome.py；Chrome 与 Edge 同为 Chromium）
+    chrome_path: str = ""           # 显式可执行文件路径；为空则按 browser 自动探测
+    chrome_profile_dir: str = ""    # 专用浏览器用户配置目录（持久化登录态）
     task_db_path: str = ""          # 任务库（默认 ~/.xdl/tasks.db）
     risk_log_path: str = ""         # 风控观测 JSONL（默认 ~/.xdl/risk-events.jsonl）
-    cdp_port: int = 9222            # Chrome 远程调试端口
+    cdp_port: int = 9222            # 浏览器远程调试端口
     # 默认无头静默运行；遇到需要人工完成的站点交互时会停止当前批次。
     chrome_headless: bool = True
     # 仅在检测到需要人工完成的站点验证时显示浏览器窗口；否则立即熔断当前批次。
@@ -83,14 +87,31 @@ class Settings:
     def __post_init__(self):
         if self.max_concurrency < 1:
             raise ConfigError("异步并发数必须是大于 0 的整数。")
+        self.browser = (self.browser or "auto").strip().lower()
+        if self.browser not in platform.BROWSER_CHOICES:
+            raise ConfigError(
+                f"未知浏览器 {self.browser!r}；可选值为 "
+                f"{' / '.join(platform.BROWSER_CHOICES)}。"
+            )
+        # 显式 chrome_path 优先（浏览器从文件名推断，推断不出按 chrome 处理）；
+        # 否则按 browser 偏好自动探测。
+        if self.chrome_path:
+            resolved = platform.infer_browser_from_path(self.chrome_path) or "chrome"
+        else:
+            resolved, detected = platform.find_browser(self.browser)
+            self.chrome_path = detected or ""
+        # 运行时派生结果：不作为 dataclass 字段，asdict/持久化不会收集它。
+        self.resolved_browser = resolved
         if not self.chrome_profile_dir:
-            self.chrome_profile_dir = os.path.join(_xdl_home(), "chrome-profile")
+            # 专用 Profile 按浏览器分目录：Chromium 系 Cookie 用各浏览器自己的
+            # 系统凭据存储加密（macOS Keychain / Windows DPAPI），跨浏览器打开同一
+            # Profile 无法解密且启动时会删除解密失败的 Cookie 行，毁掉登录态。
+            self.chrome_profile_dir = os.path.join(
+                _xdl_home(), f"{resolved}-profile")
         if not self.task_db_path:
             self.task_db_path = os.path.join(_xdl_home(), "tasks.db")
         if not self.risk_log_path:
             self.risk_log_path = os.path.join(_xdl_home(), "risk-events.jsonl")
-        if not self.chrome_path:
-            self.chrome_path = platform.find_chrome() or ""
         from .config import sign as sign_conf
         if not self.device_info_path:
             self.device_info_path = sign_conf.default_device_info_path()

@@ -10,14 +10,14 @@ Ximalaya-Downloader-Next 是一个面向个人授权内容的喜马拉雅音频�
 
 ```text
 xdl login
-  → 打开专用 Chrome
+  → 打开专用浏览器（Chrome 或 Edge，自动探测或 --browser 指定）
   → 用户完成登录
   → CDP 确认 token 并在活动上下文中捕获 Cookie
-  → 正常关闭 Chrome 并验证 Cookie 已落盘
+  → 正常关闭浏览器并验证 Cookie 已落盘
   → 将已捕获 Cookie 原子保存到 ~/.xdl/cookies.json
 ```
 
-登录流程不会把“用户按了回车”当作成功。只有活动上下文已捕获登录 token、且专用 Profile 中的 Cookie 已确认持久化，命令才会成功返回；保存缓存时不会再次启动 Chrome。
+登录流程不会把“用户按了回车”当作成功。只有活动上下文已捕获登录 token、且专用 Profile 中的 Cookie 已确认持久化，命令才会成功返回；保存缓存时不会再次启动浏览器。两个浏览器的登录态分别保存在各自专用 Profile（`chrome-profile` / `edge-profile`），互不干扰。
 
 ### 下载
 
@@ -33,7 +33,7 @@ WebUI / CLI / Python API
   → FileSink + SqliteTaskStore
 ```
 
-下载阶段命中新鲜 Cookie 缓存时不会启动 Chrome；缓存失效时会短暂打开专用 Profile 读取已持久化 Cookie，但不会用 CDP 获取播放信息。专辑清单走公开、免签的非 v1 接口；逐集播放信息才使用登录 Cookie 和 `xm-sign`。
+下载阶段命中新鲜 Cookie 缓存时不会启动浏览器；缓存失效时会短暂打开专用 Profile 读取已持久化 Cookie，但不会用 CDP 获取播放信息。专辑清单走公开、免签的非 v1 接口；逐集播放信息才使用登录 Cookie 和 `xm-sign`。
 
 ## 已实现能力
 
@@ -46,7 +46,7 @@ WebUI / CLI / Python API
 - CLI 可通过 `--concurrency N` 调整专辑下载与恢复的异步并发数，默认保持 `1`。
 - 最小化风控事件记录与离线 `risk-report`。
 - 本地 Python `xm-sign` 实现及离线契约测试。
-- Chrome/CDP 音源兼容后端。
+- Chrome/CDP 音源兼容后端（接管的浏览器跟随 `--browser` 设置，Chrome 或 Edge）。
 - 可选的设备信息刷新实验：识别到风控后可刷新本地设备信息并重试当前曲（默认关闭，不保证有效）。
 - 本机 WebUI：下载任务、登录、任务恢复、音质探测、风控报告、设备/Cookie 诊断和完整运行设置。
 

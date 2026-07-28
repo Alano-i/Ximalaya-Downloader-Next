@@ -7,6 +7,7 @@ import time
 
 from ..adapters import PySignProvider
 from ..adapters import sign as sign_tools
+from ..config import platform
 from ..errors import AuthError
 from ..settings import Settings
 
@@ -36,6 +37,7 @@ def extract_device_identity(settings: Settings, *, output: str | None = None,
         headless=headless,
         clear_device_state=refresh,
         fresh_profile=fresh_profile,
+        browser=_resolved_browser(settings),
     )
     target = output or settings.device_info_path
     sign_tools.save_device_info(result.device_info, target)
@@ -48,16 +50,23 @@ def extract_device_identity(settings: Settings, *, output: str | None = None,
     }
 
 
+def _resolved_browser(settings: Settings) -> str:
+    """Settings.__post_init__ 解析出的实际浏览器（chrome/edge）。"""
+    return getattr(settings, "resolved_browser", None) or "chrome"
+
+
 def refresh_login_cookies(settings: Settings, *, headless: bool = True) -> dict:
     """从专用 Profile 刷新登录 Cookie；匿名结果不会覆盖现有缓存。"""
     cookies = sign_tools.extract_cookies_from_profile(
         profile_dir=settings.chrome_profile_dir,
         chrome_path=settings.chrome_path,
         headless=headless,
+        browser=_resolved_browser(settings),
     )
     if not sign_tools.is_login_cookie(cookies):
+        name = platform.browser_display_name(_resolved_browser(settings))
         raise AuthError(
-            "专用 Chrome Profile 中未发现登录 token（1&_token）；"
+            f"专用 {name} Profile 中未发现登录 token（1&_token）；"
             "未覆盖现有 Cookie 缓存。"
         )
     sign_tools.save_cookies(cookies, settings.cookies_cache_path)

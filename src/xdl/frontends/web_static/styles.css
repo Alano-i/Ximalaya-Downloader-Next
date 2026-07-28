@@ -1118,6 +1118,15 @@ input::placeholder {
   font-size: 12px;
 }
 
+.settings-note {
+  grid-column: 1 / -1;
+  margin-bottom: 4px;
+  padding: 0 2px;
+  color: var(--muted, #6b7280);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .settings-actions {
   display: flex;
   align-items: center;

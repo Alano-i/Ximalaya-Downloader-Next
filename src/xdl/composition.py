@@ -31,6 +31,8 @@ def build_facade(settings: Settings | None = None) -> Facade:
 def _build_source(settings: Settings, decoder, risk_recorder):
     """按 `settings.source_backend` 装配在线音源实现。"""
     backend = (settings.source_backend or "http").strip().lower()
+    # Settings.__post_init__ 已按 browser 偏好解析出实际浏览器与路径。
+    browser = getattr(settings, "resolved_browser", None) or "chrome"
     if backend == "http":
         sign_provider = PySignProvider(
             device_info_path=settings.device_info_path,
@@ -48,6 +50,7 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             risk_recorder=risk_recorder,
             risk_fallback_headful=settings.risk_fallback_headful,
             reset_device_fingerprint=settings.reset_device_fingerprint,
+            browser=browser,
         )
         return HttpSource(
             decoder,
@@ -69,10 +72,11 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             experiment_max_rotations=settings.experiment_max_device_rotations,
             experiment_risk_cooldown_seconds=settings.experiment_risk_cooldown_seconds,
             device_info_path=settings.device_info_path,
+            browser=browser,
         )
     if backend == "chrome":
-        # 兼容路径：CDP 接管真实 Chrome。实测仍可能触发自动化环境风控，
-        # 因此不再作为默认下载路径。
+        # 兼容路径：CDP 接管真实浏览器（Chrome 或 Edge，跟随 browser 设置）。
+        # 实测仍可能触发自动化环境风控，因此不再作为默认下载路径。
         return ChromeSource(
             decoder,
             chrome_path=settings.chrome_path,
@@ -83,6 +87,7 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             risk_recorder=risk_recorder,
             risk_fallback_headful=settings.risk_fallback_headful,
             reset_device_fingerprint=settings.reset_device_fingerprint,
+            browser=browser,
         )
     raise ConfigError(
         f"未知音源后端 {settings.source_backend!r}；可选值为 'http' 或 'chrome'。"

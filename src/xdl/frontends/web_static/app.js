@@ -118,7 +118,7 @@ function renderHeader() {
     loginButton.title = "点击打开浏览器登录";
   }
   const backend = state.settings?.source_backend || "http";
-  $("#backend-status").textContent = backend === "http" ? "HTTP 后端" : "Chrome 后端";
+  $("#backend-status").textContent = backend === "http" ? "HTTP 后端" : "浏览器后端";
   $("#concurrency-status").textContent = `并发 ${state.settings?.max_concurrency ?? 1}`;
   if (state.settings?.default_quality) {
     $("#download-quality").value = state.settings.default_quality;

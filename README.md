@@ -12,13 +12,13 @@
 
 下载你有权访问的喜马拉雅内容，支持单曲、专辑、断点续传、失败重试与任务恢复。
 
-当前默认链路使用纯 Python 在本地生成 `xm-sign`，再通过 HTTP 请求播放信息。Google Chrome 用于交互登录，以及 Cookie 缓存失效时从专用 Profile 读取已持久化会话，不负责默认下载请求。
+当前默认链路使用纯 Python 在本地生成 `xm-sign`，再通过 HTTP 请求播放信息。Google Chrome 或 Microsoft Edge 用于交互登录，以及 Cookie 缓存失效时从专用 Profile 读取已持久化会话，不负责默认下载请求。
 
 > `xm-sign` 只满足特定接口的签名要求，不能替代登录、内容授权，也不保证服务端一定接受请求。请只下载你有权访问的内容。
 
 ## 快速开始
 
-要求：Python 3.10+、Google Chrome。
+要求：Python 3.10+、Google Chrome 或 Microsoft Edge。
 
 ```bash
 pip install -e .
@@ -39,7 +39,18 @@ xdl web
 xdl login
 ```
 
-浏览器打开后完成登录，并按终端提示确认。程序会在活动登录上下文中捕获 Cookie、验证登录态确实已写入专用 Profile，再保存下载所需的 Cookie；不会为了导出而重启 Chrome，成功后无需再执行刷新命令。
+浏览器打开后完成登录，并按终端提示确认。程序会在活动登录上下文中捕获 Cookie、验证登录态确实已写入专用 Profile，再保存下载所需的 Cookie；不会为了导出而重启浏览器，成功后无需再执行刷新命令。
+
+### 浏览器选择
+
+默认自动探测：Chrome 优先，未安装 Chrome 时使用 Edge，无需任何配置。两个浏览器都装了、又想指定其一，可加全局参数：
+
+```bash
+xdl --browser edge login
+xdl --browser edge track <链接或ID>
+```
+
+登录态按浏览器分别保存在专用 Profile（`~/.xdl/chrome-profile` / `~/.xdl/edge-profile`），互不影响；切换浏览器后需要重新登录。WebUI 用户直接在设置页的「路径与浏览器」中选择即可。
 
 随后直接下载：
 
@@ -89,7 +100,7 @@ WebUI 默认只监听本机回环地址，没有远程访问认证。不要把�
 
 默认的 `http` 后端按下面的顺序工作：
 
-1. 从本地 Cookie 缓存读取已验证的登录态；缓存过期时才从专用 Chrome Profile 重新导出。
+1. 从本地 Cookie 缓存读取已验证的登录态；缓存过期时才从专用浏览器 Profile 重新导出。
 2. `PySignProvider` 读取内置设备信息模板或用户配置，并向设备上报服务取得本次 `cadd` 与 `sid`。
 3. 组合 `xm-sign`、Cookie 和必要请求头，调用 `baseInfo`。
 4. 解码播放地址并交给下载任务引擎落盘。
@@ -116,15 +127,15 @@ xdl gen-sign --device-info <路径>  # 使用指定设备信息文件
 
 另有默认关闭的实验开关 `--experiment-rotate-device`：在识别到风控后可尝试刷新设备信息并重试当前曲。**不保证**恢复可用，也不构成对平台访问控制的绕过；细项通过 `Settings` 配置。
 
-### Chrome 兼容后端
+### 浏览器 CDP 兼容后端
 
-旧的 Chrome/CDP 音源仍作为兼容路径保留，但不推荐日常使用：
+旧的浏览器/CDP 音源仍作为兼容路径保留，但不推荐日常使用：
 
 ```bash
 xdl --source-backend chrome track <链接或ID>
 ```
 
-该路径主要用于登录与兼容诊断。只有在默认 HTTP 后端暂时不兼容且你理解其限制时才使用它。
+该路径主要用于登录与兼容诊断，接管哪个浏览器跟随 `--browser` 设置。只有在默认 HTTP 后端暂时不兼容且你理解其限制时才使用它。
 
 ## 本地数据
 
@@ -133,6 +144,7 @@ xdl --source-backend chrome track <链接或ID>
 | 路径 | 用途 |
 |---|---|
 | `chrome-profile/` | 专用 Chrome 登录会话 |
+| `edge-profile/` | 专用 Edge 登录会话（选用 Edge 时） |
 | `cookies.json` | HTTP 后端使用的登录 Cookie 缓存，属于敏感数据 |
 | `device-info.json` | 可选设备信息；不存在时使用包内模板 |
 | `tasks.db` | 下载任务、进度和恢复状态 |

@@ -106,6 +106,7 @@ class HttpSource:
         experiment_max_rotations: int = 0,
         experiment_risk_cooldown_seconds: float = 15.0,
         device_info_path: str = "",
+        browser: str = "chrome",
     ):
         """初始化 HTTP 音源。
 
@@ -113,9 +114,11 @@ class HttpSource:
         非空时要求安装 curl-cffi。`chrome_fallback` 是可选的 `ChromeSource`，用于
         `interactive_login` /
         `inspect_storage` 这两类**与音源后端无关**的命令——它们本来就和"如何获取
-        播放地址"无关（登录只是把会话落到 Chrome Profile；inspect 只是列设备
-        标识 key）。`xdl login` 走它把登录态写进 ~/.xdl/chrome-profile，并在关闭
-        Chrome 前捕获目标域 Cookie 给 HttpSource 使用。
+        播放地址"无关（登录只是把会话落到专用浏览器 Profile；inspect 只是列设备
+        标识 key）。`xdl login` 走它把登录态写进专用 Profile（如
+        ~/.xdl/chrome-profile），并在关闭浏览器前捕获目标域 Cookie 给 HttpSource 使用。
+        `browser` 是 Settings 解析出的实际浏览器（chrome/edge），贯通到 Cookie
+        导出与设备指纹采集的 Playwright channel 选择。
 
         实验开关（默认关闭）：命中已识别风控时，通过真实浏览器重生设备指纹并
         重试当前曲。不保证服务端接受，也不是默认抗风控策略。
@@ -124,6 +127,8 @@ class HttpSource:
         self._sign = sign_provider
         self._chrome_path = chrome_path
         self._profile_dir = profile_dir
+        self._browser = platform.infer_browser_from_path(chrome_path) or browser
+        self._browser_name = platform.browser_display_name(self._browser)
         self._cookies_cache_path = cookies_cache_path
         self._resolve_timeout = resolve_timeout
         self._chrome_headless = chrome_headless
@@ -189,33 +194,37 @@ class HttpSource:
             # 2) 缓存失效、缺失或只是匿名 Cookie：从 Profile 重读。
             if not self._profile_dir or not os.path.isdir(self._profile_dir):
                 raise ConfigError(
-                    f"未找到 Chrome Profile 目录: {self._profile_dir!r}。"
-                    "请先运行 `xdl login` 创建并保存登录态。"
+                    f"未找到 {self._browser_name} 专用 Profile 目录: "
+                    f"{self._profile_dir!r}。请先运行 `xdl login` 创建并保存登录态"
+                    f"（当前浏览器: {self._browser_name}）。"
                 )
             self._cookies = await asyncio.to_thread(
                 extract_cookies_from_profile,
                 self._profile_dir,
                 self._chrome_path,
                 self._chrome_headless,
+                browser=self._browser,
             )
             if is_login_cookie(self._cookies):
                 await self._save_authenticated_cookies(self._cookies)
         if not self._cookies:
             raise AuthError(
-                "专用 Chrome Profile 中未取到任何 Cookie。"
-                "请重新 `xdl login` 确保登录态后重试。"
+                f"专用 {self._browser_name} Profile 中未取到任何 Cookie。"
+                "请重新 `xdl login` 确保登录态后重试"
+                f"（当前浏览器: {self._browser_name}）。"
             )
         self._install_cookies(self._cookies, strip_device=self._experiment_strip_cookies)
         if not self._authenticated:
             print("[warn] 当前 Cookie 中没有发现登录 token（1&_token），会员/已购内容将被拒。")
 
     async def refresh_cookies(self) -> None:
-        """强制重新从 Chrome profile 读 Cookie（覆盖缓存）。"""
+        """强制重新从浏览器 Profile 读 Cookie（覆盖缓存）。"""
         cookies = await asyncio.to_thread(
             extract_cookies_from_profile,
             self._profile_dir,
             self._chrome_path,
             self._chrome_headless,
+            browser=self._browser,
         )
         await self._save_authenticated_cookies(cookies)
         # 运行态仍可剥离设备 Cookie；落盘缓存保留完整导出，便于诊断。
@@ -546,6 +555,7 @@ class HttpSource:
             clear_device_state=self._experiment_browser_clear,
             fresh_profile=self._experiment_fresh_profile,
             seed_cookies=seed,
+            browser=self._browser,
         )
         print(f"[experiment] 浏览器提取：{summarize_extract(result)}")
         cookie_note = self._apply_rotated_cookies(result)
@@ -609,11 +619,11 @@ class HttpSource:
 
     # ---- 与音源后端无关的命令（委托给 ChromeSource 兜底） ----
     def interactive_login(self) -> str:
-        """打开 Chrome 完成登录、保存到专用 Profile（共用 `xdl login` 流程）。
+        """打开浏览器完成登录、保存到专用 Profile（共用 `xdl login` 流程）。
 
         登录态与音源后端无关：HttpSource 只是从这个 Profile 提取登录 Cookie
-        —— `xdl login` 这一步仍走真实的 Chrome 浏览器（用户交互登录），取得
-        `1&_token` 后自动把 Cookie 拷到
+        —— `xdl login` 这一步仍走真实浏览器（用户交互登录，Chrome 或 Edge），
+        取得 `1&_token` 后自动把 Cookie 拷到
         ~/.xdl/cookies.json 供纯 HTTP 路径复用。
         """
         if self._chrome_fallback is None:
@@ -621,8 +631,8 @@ class HttpSource:
                 "未配置 chrome_fallback；无法在纯 HTTP 后端下交互登录。"
                 "请确认装配根注入了 ChromeSource（见 composition.build_facade）。")
         path = self._chrome_fallback.interactive_login()
-        # Cookie 已在登录 Chrome 仍存活时捕获。这里绝不能为导出而重启 Profile：
-        # Playwright 的测试用 Keychain 参数与系统 Chrome 不同，会在 macOS 上清掉
+        # Cookie 已在登录浏览器仍存活时捕获。这里绝不能为导出而重启 Profile：
+        # Playwright 的测试用 Keychain 参数与系统浏览器不同，会在 macOS 上清掉
         # 无法解密的 Cookie；会话 Cookie 即使加密兼容也未必能跨重启恢复。
         take_cookies = getattr(self._chrome_fallback, "take_login_cookies", None)
         if not callable(take_cookies):
@@ -649,11 +659,10 @@ class HttpSource:
         if self._cookies_cache_path:
             save_cookies(cookies, self._cookies_cache_path)
 
-    @staticmethod
-    def _require_login_cookie(cookies: list[dict]) -> None:
+    def _require_login_cookie(self, cookies: list[dict]) -> None:
         if not is_login_cookie(cookies):
             raise AuthError(
-                "专用 Chrome Profile 中未发现登录 token（1&_token）；"
+                f"专用 {self._browser_name} Profile 中未发现登录 token（1&_token）；"
                 "登录未完成或未持久化，未覆盖现有 Cookie 缓存。"
             )
 

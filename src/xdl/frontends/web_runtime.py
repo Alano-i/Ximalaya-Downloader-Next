@@ -20,8 +20,8 @@ from ..application.diagnostics import (
     refresh_login_cookies,
 )
 from ..application.usecases import AlbumResult
+from ..config import paths
 from ..config import platform as platform_conf
-from ..config.paths import xdl_home
 from ..domain import DownloadTask, TaskState, parse_range
 from ..errors import CancelledByUser, XdlError
 from ..risk import summarize_risk_events
@@ -35,12 +35,14 @@ def _now() -> str:
 
 
 def _rederive_browser_paths(values: dict, old_settings: Settings) -> None:
-    """切换 browser 时，让"程序自动填的"浏览器路径跟随新浏览器重派生。
+    """切换 browser 时，让"程序自动填的"路径跟随新浏览器重派生。
 
     WebUI 表单全量提交，无法用"字段是否在提交里"判断用户改没改路径，只能按值
-    判断：本次未编辑、且旧值仍等于自动探测结果（或为空）的 chrome_path，以及
-    本次未编辑、且旧值等于内置默认目录的 chrome_profile_dir，置空后交给
+    判断：本次未编辑、且旧值仍等于自动派生结果（或为空）的字段，置空后交给
     Settings.__post_init__ 按新 browser 重新派生；用户自定义路径一律保留。
+
+    覆盖身份三件套（Profile / Cookie 缓存 / 设备指纹）与浏览器可执行文件路径。
+    漏掉任何一件都会让新浏览器沿用上一个浏览器的会话或指纹。
     """
     if (values.get("browser") or "auto") == (old_settings.browser or "auto"):
         return
@@ -49,15 +51,11 @@ def _rederive_browser_paths(values: dict, old_settings: Settings) -> None:
             and (not old_chrome_path
                  or platform_conf.is_known_browser_path(old_chrome_path))):
         values["chrome_path"] = ""
-    known_profile_defaults = {
-        os.path.normcase(os.path.normpath(os.path.join(xdl_home(), name)))
-        for name in ("chrome-profile", "edge-profile")
-    }
-    old_profile = str(old_settings.chrome_profile_dir or "")
-    if (values.get("chrome_profile_dir") == old_settings.chrome_profile_dir
-            and os.path.normcase(os.path.normpath(old_profile))
-            in known_profile_defaults):
-        values["chrome_profile_dir"] = ""
+    for field in paths.DERIVED_PATH_BUILDERS:
+        old_value = getattr(old_settings, field, "")
+        if (values.get(field) == old_value
+                and paths.is_derived_path(field, old_value)):
+            values[field] = ""
 
 
 class OperationBusyError(RuntimeError):

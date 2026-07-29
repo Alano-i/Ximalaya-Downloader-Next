@@ -324,7 +324,7 @@
                   <option value="edge">Edge</option>
                 </select>
               </label>
-              <p class="settings-note">登录与设备采集所用的浏览器。切换后，仍为自动值的浏览器路径与 Profile 目录会跟随新浏览器重新探测；自定义路径保持不变，且需重新登录。</p>
+              <p class="settings-note" id="browser-note">登录与设备采集所用的浏览器。每个浏览器的 Profile、登录凭据与设备指纹各自独立保存，互不覆盖；自定义填写的路径保持不变。</p>
               <label class="field-row"><span>浏览器路径</span><input name="chrome_path"></label>
               <label class="field-row"><span>浏览器 Profile</span><input name="chrome_profile_dir"></label>
               <label class="field-row"><span>CDP 端口</span><input name="cdp_port" type="number" min="1" max="65535"></label>

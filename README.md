@@ -50,7 +50,7 @@ xdl --browser edge login
 xdl --browser edge track <链接或ID>
 ```
 
-登录态按浏览器分别保存在专用 Profile（`~/.xdl/chrome-profile` / `~/.xdl/edge-profile`），互不影响；切换浏览器后需要重新登录。WebUI 用户直接在设置页的「路径与浏览器」中选择即可。
+每个浏览器的登录态、Cookie 缓存与设备指纹各自独立保存（`~/.xdl/{chrome,edge}-profile`、`{chrome,edge}-cookies.json`、`{chrome,edge}-device-info.json`），互不覆盖。切换浏览器需要在新浏览器中重新登录一次，原浏览器的登录态会完整保留，切回即可恢复。WebUI 用户直接在设置页的「路径与浏览器」中选择即可。
 
 随后直接下载：
 
@@ -119,7 +119,7 @@ xdl gen-sign -n 3
 日常下载一般不需要手动维护设备信息；缺失时使用包内模板。需要自检或更新时：
 
 ```bash
-xdl extract-device                 # 从专用 Profile 采集到 ~/.xdl/device-info.json
+xdl extract-device                 # 从专用 Profile 采集到 ~/.xdl/{browser}-device-info.json
 xdl extract-device -o <路径>       # 指定输出路径
 xdl gen-sign                       # 检查本地签名链路
 xdl gen-sign --device-info <路径>  # 使用指定设备信息文件
@@ -144,11 +144,13 @@ xdl --source-backend chrome track <链接或ID>
 | 路径 | 用途 |
 |---|---|
 | `chrome-profile/` | 专用 Chrome 登录会话 |
-| `edge-profile/` | 专用 Edge 登录会话（选用 Edge 时） |
-| `cookies.json` | HTTP 后端使用的登录 Cookie 缓存，属于敏感数据 |
-| `device-info.json` | 可选设备信息；不存在时使用包内模板 |
+| `chrome-cookies.json` | Chrome 身份的登录 Cookie 缓存，属于敏感数据 |
+| `chrome-device-info.json` | Chrome 身份的设备信息；不存在时使用包内模板 |
+| `edge-profile/` `edge-cookies.json` `edge-device-info.json` | 同上，Edge 身份（选用 Edge 时） |
 | `tasks.db` | 下载任务、进度和恢复状态 |
 | `risk-events.jsonl` | 最小化请求结果观测（供 `risk-report`），不含 Cookie 或播放 URL |
+
+Profile、Cookie 缓存与设备信息共同构成**一份身份**，三者必须同源于同一个浏览器，因此统一按浏览器分文件保存。从旧版本升级时，`cookies.json` 与 `device-info.json` 会在首次运行时自动改名为 `chrome-*`，登录态不受影响。
 
 可通过环境变量 `XDL_HOME` 修改用户数据根目录。
 

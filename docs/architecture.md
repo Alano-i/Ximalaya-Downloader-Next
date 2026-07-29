@@ -53,9 +53,9 @@ WebUI 在 `frontends` 内进一步分成三层：FastAPI 只负责输入校验�
 1. 在活动浏览器上下文中确认存在非空的 `*&_token` Cookie，并在关闭前捕获全部目标域 Cookie。
 2. 正常关闭浏览器后，以只读方式检查 Cookie 数据库，确认 token 已写入磁盘。
 
-`HttpSource.interactive_login()` 直接接收活动登录上下文捕获的 Cookie，并只在确认登录 token 存在时原子更新 `~/.xdl/cookies.json`。登录后不会为了导出 Cookie 再次启动 Profile，避免会话 Cookie 跨重启丢失，也避免 Playwright 的测试凭据存储参数与系统浏览器的 Cookie 加密密钥不一致。匿名结果不会覆盖已有的有效缓存。
+`HttpSource.interactive_login()` 直接接收活动登录上下文捕获的 Cookie，并只在确认登录 token 存在时原子更新该浏览器的 Cookie 缓存（`~/.xdl/{browser}-cookies.json`）。登录后不会为了导出 Cookie 再次启动 Profile，避免会话 Cookie 跨重启丢失，也避免 Playwright 的测试凭据存储参数与系统浏览器的 Cookie 加密密钥不一致。匿名结果不会覆盖已有的有效缓存。
 
-专用 Profile 按浏览器分目录（`~/.xdl/chrome-profile` / `~/.xdl/edge-profile`）：Chromium 系 Cookie 用各浏览器自己的系统凭据存储加密（macOS Keychain / Windows DPAPI），跨浏览器打开同一 Profile 无法解密，启动时还会删除解密失败的 Cookie 行，因此两个浏览器绝不共享同一目录。
+专用 Profile 按浏览器分目录（`~/.xdl/chrome-profile` / `~/.xdl/edge-profile`）：Chromium 系 Cookie 用各浏览器自己的系统凭据存储加密（macOS Keychain / Windows DPAPI），跨浏览器打开同一 Profile 无法解密，启动时还会删除解密失败的 Cookie 行，因此两个浏览器绝不共享同一目录。Cookie 缓存与设备信息是该 Profile 的派生产物（Cookie 导出含 `_xmLog`/`wfp` 等设备指纹 Cookie，`device_info.ew1` 编码了完整 UA），同样按浏览器分文件保存，避免把一个浏览器的会话配上另一个浏览器的指纹。旧布局的 `cookies.json` / `device-info.json` 在启动时自动改名为 `chrome-*`。
 
 ### 3.2 `xm-sign`
 
@@ -74,7 +74,7 @@ device_info
 
 每次 `sign()` 进行一次设备上报，并使用该响应成对返回的 `cadd` 与 `sid`。旧的 `cadd` 缓存没有减少上报次数，还可能组合不匹配的数据，已移除内部缓存逻辑；兼容构造参数仍暂时保留。
 
-设备信息优先读取 `~/.xdl/device-info.json`，文件不存在或不可读时使用包内 `device_info_default.json`。`Zf5` 在每次上报前更新为当前毫秒时间戳。加载设备信息时会对明显异常的 UA 字段做规范化，使上报载荷与常规浏览器形态一致；这不替代登录或内容授权。
+设备信息优先读取当前浏览器的 `~/.xdl/{browser}-device-info.json`，文件不存在或不可读时使用包内 `device_info_default.json`。`Zf5` 在每次上报前更新为当前毫秒时间戳。加载设备信息时会对明显异常的 UA 字段做规范化，使上报载荷与常规浏览器形态一致；这不替代登录或内容授权。
 
 ### 3.3 HTTP 音源
 

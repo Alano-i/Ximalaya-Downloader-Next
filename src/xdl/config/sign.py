@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 
-from .paths import xdl_home
+from .paths import browser_cookies_path, browser_device_info_path
 
 # du_web_sdk 内 _getDeviceKey(0) 返回的硬编码密钥
 KEY = "m9ZtRrz:qujT8@da"
@@ -50,14 +50,17 @@ SDK_VERSION = "2.0.0"
 SIGN_CACHE_TTL_SECONDS = 30 * 60
 
 
-def default_device_info_path() -> str:
-    """存放用户提取的设备指纹 JSON 的默认路径（~/.xdl/device-info.json）。"""
-    return os.path.join(xdl_home(), "device-info.json")
+def default_device_info_path(browser: str = "chrome") -> str:
+    """设备指纹 JSON 的默认路径（~/.xdl/{browser}-device-info.json）。
+
+    指纹与 Cookie、Profile 同属一套身份，必须按浏览器分家（见 config/paths.py）。
+    """
+    return browser_device_info_path(browser)
 
 
-def default_cookies_cache_path() -> str:
-    """从 Chrome profile 中导出的登录 Cookie 缓存路径（~/.xdl/cookies.json）。"""
-    return os.path.join(xdl_home(), "cookies.json")
+def default_cookies_cache_path(browser: str = "chrome") -> str:
+    """登录 Cookie 缓存的默认路径（~/.xdl/{browser}-cookies.json）。"""
+    return browser_cookies_path(browser)
 
 
 def load_default_device_info() -> dict:

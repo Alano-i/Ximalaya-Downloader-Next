@@ -1127,6 +1127,10 @@ input::placeholder {
   line-height: 1.6;
 }
 
+.settings-note.is-warning {
+  color: var(--orange, #b45309);
+}
+
 .settings-actions {
   display: flex;
   align-items: center;

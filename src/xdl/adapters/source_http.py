@@ -644,7 +644,42 @@ class HttpSource:
         self._save_authenticated_cookies_sync(cookies)
         # 登录成功后运行态同样可剥离设备 Cookie；缓存写入完整会话。
         self._install_cookies(cookies, strip_device=self._experiment_strip_cookies)
+        self._collect_device_info_if_missing()
         return path
+
+    def _collect_device_info_if_missing(self) -> None:
+        """登录后补齐该浏览器的设备指纹（仅在缺失时采集，不覆盖已有文件）。
+
+        device_info 与 Cookie 属于同一份身份：`ew1` 编码了完整 UA。缺失时
+        PySignProvider 会静默回退到内置模板（Chrome 125 / Windows），于是刚
+        登录的会话会配上一副既不符本机系统、也不符所用浏览器的指纹——这正是
+        跨浏览器身份错配的另一种形态。在登录后顺带从同一个 Profile 采一次，
+        三件套一次性齐备，用户不需要知道还有 `xdl extract-device` 这一步。
+
+        只读采集（不清设备态、不用临时 Profile），且 Cookie 缓存此前已经落盘，
+        重启 Profile 不会影响已保存的登录态。失败只警告：指纹缺失有内置模板
+        兜底，不该让一次已经成功的登录变成失败。
+        """
+        path = self._device_info_path
+        if not path or os.path.isfile(path):
+            return
+        print(f"首次在 {self._browser_name} 中登录，正在采集设备指纹…")
+        try:
+            result = refresh_device_identity_via_browser(
+                profile_dir=self._profile_dir,
+                chrome_path=self._chrome_path,
+                headless=self._chrome_headless,
+                clear_device_state=False,
+                fresh_profile=False,
+                browser=self._browser,
+            )
+            save_device_info(result.device_info, path)
+        except Exception as e:
+            print(f"[warn] 设备指纹采集失败，将回退到内置模板: {e}")
+            print("[warn] 可稍后运行 `xdl extract-device` 补齐；"
+                  "内置模板是 Chrome/Windows，与本机不符时更容易触发风控。")
+            return
+        print(f"设备指纹已保存: {path}")
 
     async def _save_authenticated_cookies(self, cookies: list[dict]) -> None:
         self._require_login_cookie(cookies)

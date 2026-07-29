@@ -212,6 +212,19 @@ def test_login_status_points_at_other_browser(home):
     assert status["other_browser_authenticated"] == "chrome"
 
 
+def test_missing_device_info_fallback_is_not_silent(home, capsys):
+    """回退到内置模板（Chrome/Windows）必须出声，否则指纹错配完全无法察觉。"""
+    from xdl.adapters import PySignProvider
+
+    signer = PySignProvider(device_info_path=str(home / "absent.json"))
+    info = signer._load_device_info()
+
+    assert info  # 仍然可用：内置模板兜底，不影响功能
+    out = capsys.readouterr().out
+    assert "不存在" in out
+    assert "extract-device" in out
+
+
 def test_login_status_ignores_other_browser_for_custom_path(home):
     """自定义 Cookie 路径不按浏览器分家，跨浏览器提示无意义。"""
     _write_login_cookies(home / "chrome-cookies.json")

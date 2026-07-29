@@ -15,6 +15,7 @@ xdl login
   → CDP 确认 token 并在活动上下文中捕获 Cookie
   → 正常关闭浏览器并验证 Cookie 已落盘
   → 将已捕获 Cookie 原子保存到 ~/.xdl/{browser}-cookies.json
+  → 若该浏览器的设备信息尚不存在，从同一 Profile 只读采集一次
 ```
 
 登录流程不会把“用户按了回车”当作成功。只有活动上下文已捕获登录 token、且专用 Profile 中的 Cookie 已确认持久化，命令才会成功返回；保存缓存时不会再次启动浏览器。两个浏览器的身份三件套（Profile、Cookie 缓存、设备信息）分别保存，互不覆盖；切换浏览器需重新登录一次，原浏览器的登录态完整保留。

@@ -116,7 +116,7 @@ xdl gen-sign -n 3
 
 ### 设备信息（可选）
 
-日常下载一般不需要手动维护设备信息；缺失时使用包内模板。需要自检或更新时：
+`xdl login` 会在该浏览器首次登录后自动采集一次设备信息，日常下载一般不需要手动维护；采集失败时会退回包内模板并给出提示。需要自检或更新时：
 
 ```bash
 xdl extract-device                 # 从专用 Profile 采集到 ~/.xdl/{browser}-device-info.json

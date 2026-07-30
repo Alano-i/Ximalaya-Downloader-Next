@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import platform as stdlib_platform
 import re
 import sqlite3
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -249,17 +251,40 @@ def _parse_base_info_payload(url: str, body: dict, target_track_id: str):
     return None, {"ret": body.get("ret"), "msg": body.get("msg")}
 
 
+def _client_hints_platform() -> tuple[str, str, str]:
+    """UA client-hints 的 (platform, platformVersion, architecture)，按本机系统生成。
+
+    原先写死 Windows/x86，macOS 用户会拿到与本机不符的标识。
+    """
+    if sys.platform == "darwin":
+        os_name, os_version = "macOS", "14.0.0"
+    elif sys.platform.startswith("win"):
+        os_name, os_version = "Windows", "15.0.0"
+    else:
+        os_name, os_version = "Linux", ""
+    arch = ("arm" if stdlib_platform.machine().lower() in ("arm64", "aarch64")
+            else "x86")
+    return os_name, os_version, arch
+
+
 class ChromeSource:
-    """经 CDP 接管真实 Chrome 解析单曲（async，可并发）；HTTP 取专辑清单。"""
+    """经 CDP 接管真实浏览器解析单曲（async，可并发）；HTTP 取专辑清单。
+
+    类名保留 Chrome 前缀仅为兼容；Chrome 与 Edge 同为 Chromium，行为一致，
+    由 `browser` 参数决定实际接管的浏览器（影响文案与 UA client-hints）。
+    """
 
     def __init__(self, decoder: Decoder, chrome_path: str, profile_dir: str,
                  port: int = 9222, resolve_timeout: int = 40, headless: bool = True,
                  risk_recorder: RiskEventRecorder | None = None,
                  risk_fallback_headful: bool = True,
-                 reset_device_fingerprint: bool = True):
+                 reset_device_fingerprint: bool = True,
+                 browser: str = "chrome"):
         self._decoder = decoder
         self._chrome_path = chrome_path
         self._profile_dir = profile_dir
+        self._browser = platform.infer_browser_from_path(chrome_path) or browser
+        self._browser_name = platform.browser_display_name(self._browser)
         self._port = port
         self._timeout = resolve_timeout
         self._headless = headless
@@ -281,7 +306,7 @@ class ChromeSource:
         self._ua_override: str | None = None
         self._proc = None
         self._pw = None
-        self._browser = None
+        self._pw_browser = None
         self._ctx = None
         # `xdl login` 成功时，在关闭 Chrome 前捕获目标域 Cookie；HttpSource 随后
         # 取走并写入 JSON 缓存，避免为导出而用不同凭据存储参数重启同一 Profile。
@@ -298,13 +323,14 @@ class ChromeSource:
         from playwright.async_api import async_playwright
         self._pw = await async_playwright().start()
         try:
-            self._browser = await self._pw.chromium.connect_over_cdp(
+            self._pw_browser = await self._pw.chromium.connect_over_cdp(
                 f"http://127.0.0.1:{self._port}")
         except Exception as e:
             await self.close()
-            raise NetworkError(f"接管 Chrome 失败（端口 {self._port}）: {e}") from e
-        self._ctx = (self._browser.contexts[0] if self._browser.contexts
-                     else await self._browser.new_context())
+            raise NetworkError(
+                f"接管 {self._browser_name} 失败（端口 {self._port}）: {e}") from e
+        self._ctx = (self._pw_browser.contexts[0] if self._pw_browser.contexts
+                     else await self._pw_browser.new_context())
         try:
             self._authenticated = _has_login_cookie(
                 await self._ctx.cookies(platform.BASE)
@@ -317,8 +343,8 @@ class ChromeSource:
 
     async def close(self) -> None:
         try:
-            if self._browser is not None:
-                await self._browser.close()
+            if self._pw_browser is not None:
+                await self._pw_browser.close()
         except Exception:
             pass
         try:
@@ -335,7 +361,7 @@ class ChromeSource:
                     self._proc.kill()
                 except Exception:
                     pass
-        self._proc = self._pw = self._browser = self._ctx = None
+        self._proc = self._pw = self._pw_browser = self._ctx = None
 
     # ---- 设备指纹重置 ----
     @staticmethod
@@ -642,9 +668,10 @@ class ChromeSource:
         os.makedirs(self._profile_dir, exist_ok=True)
         if _port_alive(self._port):
             raise NetworkError(
-                f"Chrome 调试端口 {self._port} 已被占用，请先关闭占用该端口的浏览器。"
+                f"{self._browser_name} 调试端口 {self._port} 已被占用，"
+                "请先关闭占用该端口的浏览器。"
             )
-        print("即将打开 Chrome，请在其中完成登录（扫码或账号密码）。")
+        print(f"即将打开 {self._browser_name}，请在其中完成登录（扫码或账号密码）。")
         args = [self._chrome_path,
                 f"--remote-debugging-port={self._port}",
                 f"--user-data-dir={self._profile_dir}",
@@ -659,13 +686,15 @@ class ChromeSource:
                     break
                 time.sleep(0.2)
             else:
-                raise NetworkError(f"Chrome 调试端口 {self._port} 未就绪（启动超时）。")
+                raise NetworkError(
+                    f"{self._browser_name} 调试端口 {self._port} 未就绪（启动超时）。")
 
             while not verified:
                 input(">>> 登录完成后回到这里按回车，程序将验证登录状态: ")
                 verified = self._verify_interactive_login()
                 if not verified:
-                    print("未检测到专用 Chrome 的登录状态，请在该窗口继续登录后重试。")
+                    print(f"未检测到专用 {self._browser_name} 的登录状态，"
+                          "请在该窗口继续登录后重试。")
         finally:
             # 验证成功时 _verify_interactive_login 已通过 CDP 正常关闭浏览器，
             # 只等待其退出，异常/中断时才使用终止作为兜底。
@@ -679,11 +708,13 @@ class ChromeSource:
                 self._terminate_process(proc)
         if not closed_cleanly:
             self._login_cookies = []
-            raise NetworkError("Chrome 未能正常退出，无法确认登录态是否已持久化。")
+            raise NetworkError(
+                f"{self._browser_name} 未能正常退出，无法确认登录态是否已持久化。")
         if not _has_persisted_login_cookie(self._profile_dir):
             self._login_cookies = []
             raise AuthError(
-                "登录 token 未持久化到专用 Chrome Profile；请重新登录后再试。"
+                f"登录 token 未持久化到专用 {self._browser_name} Profile；"
+                "请重新登录后再试。"
             )
         return self._profile_dir
 
@@ -733,8 +764,9 @@ class ChromeSource:
     def _require_chrome(self) -> None:
         if not self._chrome_path or not os.path.exists(self._chrome_path):
             raise ConfigError(
-                f"未找到 Chrome 可执行文件: {self._chrome_path!r}。"
-                "请安装 Google Chrome，或在配置中指定 chrome_path。")
+                f"未找到 {self._browser_name} 可执行文件: {self._chrome_path!r}。"
+                f"请安装 Google Chrome 或 Microsoft Edge，或在配置中指定 chrome_path"
+                f"（也可用 --browser 切换自动探测的浏览器）。")
 
     def _launch_chrome(self, headless: bool) -> None:
         args = [self._chrome_path,
@@ -749,7 +781,8 @@ class ChromeSource:
             if _port_alive(self._port):
                 return
             time.sleep(0.2)
-        raise NetworkError(f"Chrome 调试端口 {self._port} 未就绪（启动超时）。")
+        raise NetworkError(
+            f"{self._browser_name} 调试端口 {self._port} 未就绪（启动超时）。")
 
     async def _capture_base_info(self, page, track_id: str, timeout: float | None = None):
         wait_budget = self._timeout if timeout is None else timeout
@@ -810,10 +843,10 @@ class ChromeSource:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _apply_ua_override(self, page) -> None:
-        """无头会话下把 navigator.userAgent 与请求头里的 HeadlessChrome 抹成 Chrome。
+        """无头会话下把 navigator.userAgent 与请求头里的 HeadlessChrome 抹成正常浏览器。
 
         用页面实际 UA 派生，主版本号与真实浏览器一致，避免 UA 与 client-hints 错位。
-        有头（本就是正常 Chrome）时不需要，探测一次后置空跳过。
+        有头（本就是正常浏览器）时不需要，探测一次后置空跳过。
         """
         if self._ua_override == "":
             return
@@ -826,18 +859,21 @@ class ChromeSource:
                 return
             match = re.search(r"Chrome/(\d+)", self._ua_override)
             major = match.group(1) if match else "150"
+            brand = ("Microsoft Edge" if self._browser == "edge"
+                     else "Google Chrome")
+            os_name, os_version, arch = _client_hints_platform()
             client = await page.context.new_cdp_session(page)
             await client.send("Network.setUserAgentOverride", {
                 "userAgent": self._ua_override,
                 "userAgentMetadata": {
                     "brands": [
-                        {"brand": "Google Chrome", "version": major},
+                        {"brand": brand, "version": major},
                         {"brand": "Chromium", "version": major},
                         {"brand": "Not?A_Brand", "version": "24"},
                     ],
                     "fullVersion": f"{major}.0.0.0",
-                    "platform": "Windows", "platformVersion": "15.0.0",
-                    "architecture": "x86", "model": "", "mobile": False,
+                    "platform": os_name, "platformVersion": os_version,
+                    "architecture": arch, "model": "", "mobile": False,
                 },
             })
         except Exception:
@@ -963,7 +999,7 @@ class ChromeSource:
             time.sleep(0.1)
         self._headless = False
         self._escalated = True
-        self._ua_override = ""           # 有头是正常 Chrome，无需 UA 覆盖
+        self._ua_override = ""           # 有头是正常浏览器，无需 UA 覆盖
         await self.open()
 
     def _raise_for(self, last_err):

@@ -227,7 +227,7 @@
             <div class="action-row">
               <div class="action-copy">
                 <h3>刷新登录凭据</h3>
-                <p>从专用 Chrome Profile 重新导出 Cookie；匿名结果不会覆盖缓存。</p>
+                <p>从专用浏览器 Profile 重新导出 Cookie；匿名结果不会覆盖缓存。</p>
               </div>
               <label class="check-control"><input id="cookies-visible" type="checkbox"> 显示浏览器</label>
               <button class="button secondary" type="button" data-action="refresh-cookies">刷新凭据</button>
@@ -261,7 +261,7 @@
           </div>
           <form class="extract-form" id="extract-form">
             <label class="field-row"><span>输出路径</span><input id="extract-output" placeholder="使用设置中的默认路径"></label>
-            <label class="field-row"><span>Profile 路径</span><input id="extract-profile" placeholder="使用专用 Chrome Profile"></label>
+            <label class="field-row"><span>Profile 路径</span><input id="extract-profile" placeholder="使用设置中的专用浏览器 Profile"></label>
             <div class="toggle-grid">
               <label class="switch-row"><input id="extract-visible" type="checkbox"><span>显示浏览器</span></label>
               <label class="switch-row"><input id="extract-refresh" type="checkbox"><span>先清设备状态再采集</span></label>
@@ -293,7 +293,7 @@
                 <select name="default_quality"><option value="standard">标准</option><option value="high">高</option><option value="low">低</option></select>
               </label>
               <label class="field-row"><span>音源后端</span>
-                <select name="source_backend"><option value="http">HTTP（推荐）</option><option value="chrome">Chrome（兼容）</option></select>
+                <select name="source_backend"><option value="http">HTTP（推荐）</option><option value="chrome">浏览器 CDP（兼容，跟随浏览器设置）</option></select>
               </label>
               <label class="field-row"><span>异步并发数</span><input name="max_concurrency" type="number" min="1" max="16" required></label>
             </div>
@@ -317,8 +317,16 @@
           <details class="settings-details">
             <summary>路径与浏览器</summary>
             <div class="settings-fields details-fields">
-              <label class="field-row"><span>Chrome 路径</span><input name="chrome_path"></label>
-              <label class="field-row"><span>Chrome Profile</span><input name="chrome_profile_dir"></label>
+              <label class="field-row"><span>浏览器</span>
+                <select name="browser">
+                  <option value="auto">自动（Chrome 优先，Edge 兜底）</option>
+                  <option value="chrome">Chrome</option>
+                  <option value="edge">Edge</option>
+                </select>
+              </label>
+              <p class="settings-note" id="browser-note">登录与设备采集所用的浏览器。每个浏览器的 Profile、登录凭据与设备指纹各自独立保存，互不覆盖；自定义填写的路径保持不变。</p>
+              <label class="field-row"><span>浏览器路径</span><input name="chrome_path"></label>
+              <label class="field-row"><span>浏览器 Profile</span><input name="chrome_profile_dir"></label>
               <label class="field-row"><span>CDP 端口</span><input name="cdp_port" type="number" min="1" max="65535"></label>
               <label class="field-row"><span>任务库</span><input name="task_db_path"></label>
               <label class="field-row"><span>风控日志</span><input name="risk_log_path"></label>
@@ -326,7 +334,7 @@
               <label class="field-row"><span>Cookie 缓存</span><input name="cookies_cache_path"></label>
               <label class="field-row"><span>HTTP 浏览器标识</span><input name="source_impersonate"></label>
               <div class="toggle-grid wide">
-                <label class="switch-row"><input name="chrome_headless" type="checkbox"><span>Chrome 默认无头运行</span></label>
+                <label class="switch-row"><input name="chrome_headless" type="checkbox"><span>浏览器默认无头运行</span></label>
                 <label class="switch-row"><input name="risk_fallback_headful" type="checkbox"><span>需要人工验证时显示浏览器</span></label>
               </div>
             </div>

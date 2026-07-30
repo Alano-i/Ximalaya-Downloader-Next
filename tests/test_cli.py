@@ -150,7 +150,7 @@ def test_refresh_cookies_without_token_fails_without_overwriting_cache(monkeypat
         chrome_path="chrome",
         cookies_cache_path="cookies.json",
     )
-    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(cli, "Settings", lambda **_kw: settings)
     monkeypatch.setattr(sign, "extract_cookies_from_profile", lambda **_kw: [
         {"name": "_xmLog", "value": "anonymous"},
     ])

@@ -104,21 +104,32 @@ function setDownloadMode(mode) {
 function renderHeader() {
   const loginButton = $("#login-status");
   const loginText = $("#login-status-text");
+  // 登录态按浏览器分家，所以状态里必须带上"是哪个浏览器"，否则用户切换浏览器后
+  // 只会看到莫名其妙的"尚未登录"。
+  const browserName = state.login?.browser_name || "";
+  const prefix = browserName ? `${browserName} · ` : "";
+  const other = state.login?.other_browser_authenticated;
+  const otherName = other === "edge" ? "Edge" : other === "chrome" ? "Chrome" : "";
   if (state.login?.authenticated) {
-    loginText.textContent = "已保存登录态";
+    loginText.textContent = `${prefix}已保存登录态`;
     loginButton.classList.remove("is-warning");
     loginButton.title = "点击重新登录";
+  } else if (otherName) {
+    loginText.textContent = `${prefix}尚未登录`;
+    loginButton.classList.add("is-warning");
+    loginButton.title = `${otherName} 中已有登录态并已完整保留，可在设置里切回；`
+      + `或点击在${browserName || "当前浏览器"}中登录。`;
   } else if (state.login?.profile_exists) {
-    loginText.textContent = "凭据未缓存";
+    loginText.textContent = `${prefix}凭据未缓存`;
     loginButton.classList.add("is-warning");
     loginButton.title = "点击登录或刷新凭据";
   } else {
-    loginText.textContent = "尚未登录";
+    loginText.textContent = `${prefix}尚未登录`;
     loginButton.classList.add("is-warning");
     loginButton.title = "点击打开浏览器登录";
   }
   const backend = state.settings?.source_backend || "http";
-  $("#backend-status").textContent = backend === "http" ? "HTTP 后端" : "Chrome 后端";
+  $("#backend-status").textContent = backend === "http" ? "HTTP 后端" : "浏览器后端";
   $("#concurrency-status").textContent = `并发 ${state.settings?.max_concurrency ?? 1}`;
   if (state.settings?.default_quality) {
     $("#download-quality").value = state.settings.default_quality;
@@ -425,6 +436,30 @@ function outcomeLabel(value) {
   return { success: "成功", risk_control: "风控", auth: "鉴权", network: "网络", unknown: "未知" }[value] || value;
 }
 
+const BROWSER_NOTE_DEFAULT =
+  "登录与设备采集所用的浏览器。每个浏览器的 Profile、登录凭据与设备指纹各自独立保存，"
+  + "互不覆盖；自定义填写的路径保持不变。";
+
+function renderBrowserNote() {
+  const note = $("#browser-note");
+  if (!note) return;
+  const selected = $('#settings-form [name="browser"]')?.value;
+  const saved = state.settings?.browser || "auto";
+  if (!selected || selected === saved) {
+    note.textContent = BROWSER_NOTE_DEFAULT;
+    note.classList.remove("is-warning");
+    return;
+  }
+  // 切换是换一整套身份，需要重新登录一次——但旧浏览器的登录态完整保留，
+  // 切回即可恢复。把"可逆"讲清楚，用户才不会以为自己把登录弄丢了。
+  const current = state.login?.browser_name || "当前浏览器";
+  const target = { auto: "自动选择的浏览器", chrome: "Chrome", edge: "Edge" }[selected]
+    || selected;
+  note.textContent = `保存后将切换到 ${target}，需要在其中重新登录一次；`
+    + `${current} 的登录态与设备指纹会完整保留，切回即可恢复。`;
+  note.classList.add("is-warning");
+}
+
 function populateSettingsForm() {
   if (!state.settings) return;
   const form = $("#settings-form");
@@ -434,6 +469,7 @@ function populateSettingsForm() {
     if (input.type === "checkbox") input.checked = Boolean(value);
     else input.value = String(value);
   });
+  renderBrowserNote();
   state.settingsPopulated = true;
 }
 
@@ -548,6 +584,10 @@ $("#extract-form").addEventListener("submit", (event) => {
 $("#settings-form").addEventListener("submit", (event) => {
   event.preventDefault();
   saveSettings();
+});
+
+$("#settings-form").addEventListener("change", (event) => {
+  if (event.target?.name === "browser") renderBrowserNote();
 });
 
 $("#task-search").addEventListener("input", (event) => {

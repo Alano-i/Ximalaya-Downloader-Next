@@ -24,15 +24,31 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 REFERER = BASE + "/"
 
-# 启动真实 Chrome 的参数（仅开调试端口、不带任何自动化标志，避免被风控识别为机器人）。
-# 关键：必须自己干净启动 Chrome 再用 CDP 接管；若让 Playwright 直接 launch，会带上
+# 启动真实浏览器的参数（仅开调试端口、不带任何自动化标志，避免被风控识别为机器人）。
+# 关键：必须自己干净启动浏览器再用 CDP 接管；若让 Playwright 直接 launch，会带上
 # --enable-automation 等痕迹，baseInfo 会被 du_web_sdk 风控返回 1001/3005「系统繁忙」。
+# Chrome 与 Edge 同为 Chromium，这些参数对两者一致。
 CHROME_LAUNCH_ARGS = [
     "--no-first-run",
     "--no-default-browser-check",
     "--mute-audio",
     "--autoplay-policy=no-user-gesture-required",
 ]
+
+BROWSER_CHOICES = ("auto", "chrome", "edge")
+_BROWSER_NAMES = {"chrome": "Chrome", "edge": "Edge"}
+
+
+def browser_display_name(browser: str) -> str:
+    """用户可见的浏览器名（报错/提示文案统一走这里）。"""
+    return _BROWSER_NAMES.get(browser, browser or "Chrome")
+
+
+def _first_existing(candidates) -> str | None:
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return None
 
 
 def find_chrome() -> str | None:
@@ -41,6 +57,8 @@ def find_chrome() -> str | None:
     if sys.platform == "darwin":
         candidates = [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser(
+                "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
         ]
     elif sys.platform.startswith("win"):
@@ -54,10 +72,111 @@ def find_chrome() -> str | None:
             found = shutil.which(name)
             if found:
                 candidates.append(found)
-    for c in candidates:
-        if c and os.path.exists(c):
-            return c
+    return _first_existing(candidates)
+
+
+def _find_edge_windows() -> str | None:
+    # 注册表 App Paths 最可靠（覆盖 per-user 安装与非系统盘安装）；winreg 仅 Windows 可用。
+    try:
+        import winreg
+    except ImportError:
+        winreg = None
+    if winreg is not None:
+        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(
+                        root,
+                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe"
+                ) as key:
+                    path, _ = winreg.QueryValueEx(key, "")
+            except OSError:
+                continue
+            if path and os.path.exists(path):
+                return path
+    candidates = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.append(os.path.join(
+            local_app_data, r"Microsoft\Edge\Application\msedge.exe"))
+    return _first_existing(candidates)
+
+
+def find_edge() -> str | None:
+    """探测本机 Microsoft Edge 可执行文件路径。"""
+    if sys.platform == "darwin":
+        return _first_existing([
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            os.path.expanduser(
+                "~/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        ])
+    if sys.platform.startswith("win"):
+        return _find_edge_windows()
+    # linux
+    for name in ("microsoft-edge", "microsoft-edge-stable"):
+        found = shutil.which(name)
+        if found:
+            return found
     return None
+
+
+def find_browser(prefer: str = "auto") -> tuple[str, str | None]:
+    """按偏好探测浏览器，返回 (browser, path)；未找到时 path 为 None。
+
+    prefer 为 "auto" 时 Chrome 优先、Edge 兜底（保持旧行为：装有 Chrome 的机器
+    默认继续用 Chrome）；为 "chrome"/"edge" 时只探测指定浏览器。
+    """
+    # 在函数体内解析，保证测试可 monkeypatch find_chrome/find_edge。
+    finders = {"chrome": find_chrome, "edge": find_edge}
+    order = ("chrome", "edge") if prefer == "auto" else (prefer,)
+    for name in order:
+        finder = finders.get(name)
+        if finder is None:
+            continue
+        path = finder()
+        if path:
+            return name, path
+    return ((prefer if prefer in finders else "chrome"), None)
+
+
+def infer_browser_from_path(path: str) -> str | None:
+    """从可执行文件路径推断浏览器（显式 chrome_path 覆盖时归一文案/UA 用）。"""
+    name = os.path.basename(str(path or "")).lower()
+    if "msedge" in name or "microsoft edge" in name:
+        return "edge"
+    if "chrome" in name or "chromium" in name:
+        return "chrome"
+    return None
+
+
+def is_known_browser_path(path: str) -> bool:
+    """路径是否等于某浏览器在当前机器上的自动探测结果（含按安装布局枚举）。
+
+    WebUI 切换浏览器时据此判断 chrome_path 是"程序自动填的"（应跟随重派生）
+    还是用户自定义的（保留不动）。枚举值与 find_chrome/find_edge 同源。
+    """
+    text = str(path or "").strip()
+    if not text:
+        return False
+    probes = {
+        find_chrome(), find_edge(),
+        # 跨平台标准安装布局：用户手动填的恰好是另一浏览器的标准路径时，
+        # 切换浏览器同样应让它跟随重派生。
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    }
+    norm = os.path.normcase(os.path.normpath(text))
+    return any(
+        probe and norm == os.path.normcase(os.path.normpath(str(probe)))
+        for probe in probes
+    )
 
 # ---- www2/mweb2 音频 URL 解密所需的置换表与密钥 ----
 PERMUTATION_TABLE_O = [

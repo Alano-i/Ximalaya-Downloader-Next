@@ -99,6 +99,7 @@ def _launch_kwargs(
     profile_dir: str,
     chrome_path: str,
     headless: bool,
+    browser: str = "chrome",
 ) -> dict:
     kwargs: dict[str, Any] = dict(
         headless=headless,
@@ -119,8 +120,8 @@ def _launch_kwargs(
     if chrome_path:
         kwargs["executable_path"] = chrome_path
     else:
-        # 优先系统 Google Chrome；与 easy-sign 用 Edge channel 同类思路。
-        kwargs["channel"] = "chrome"
+        # 优先系统安装的真实浏览器；Chrome/Edge 同为 Chromium 内核，二选一即可。
+        kwargs["channel"] = "msedge" if browser == "edge" else "chrome"
     return kwargs
 
 
@@ -224,8 +225,9 @@ def extract_device_info(
     url: str = platform.HOME_URL,
     timeout_ms: int = 60000,
     wait_ms: int = 3000,
+    browser: str = "chrome",
 ) -> dict:
-    """用 Playwright 在指定 Chrome 用户目录里打开页面，读出设备指纹字典。
+    """用 Playwright 在指定浏览器用户目录里打开页面，读出设备指纹字典。
 
     只读提取，不清理设备态。若需要「重生」指纹，请用
     `refresh_device_identity_via_browser`。
@@ -240,6 +242,7 @@ def extract_device_info(
         wait_ms=wait_ms,
         clear_device_state=False,
         fresh_profile=False,
+        browser=browser,
     )
     return result.device_info
 
@@ -255,6 +258,7 @@ def refresh_device_identity_via_browser(
     fresh_profile: bool = False,
     post_clear_wait_ms: int = 2500,
     seed_cookies: list[dict] | None = None,
+    browser: str = "chrome",
 ) -> DeviceExtractResult:
     """打开真实浏览器，可选清设备态后让 du_web_sdk 重生，再采集指纹与 Cookie。
 
@@ -302,7 +306,7 @@ def refresh_device_identity_via_browser(
 
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(
-                **_launch_kwargs(work_profile, chrome_path, headless)
+                **_launch_kwargs(work_profile, chrome_path, headless, browser)
             )
             try:
                 page = ctx.new_page()
@@ -378,7 +382,7 @@ def refresh_device_identity_via_browser(
         )
     finally:
         if temp_dir and not _remove_temp_profile(temp_dir):
-            print(f"[warn] 临时 Chrome Profile 清理失败: {temp_dir}")
+            print(f"[warn] 临时浏览器 Profile 清理失败: {temp_dir}")
 
 
 def save_device_info(device_info: dict, path: str) -> None:

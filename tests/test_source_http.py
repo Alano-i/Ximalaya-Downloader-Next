@@ -10,6 +10,7 @@
 """
 import base64
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,6 +96,19 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
                         lambda *a, **kw: cached_cookies)
     monkeypatch.setattr(mod, "save_cookies", lambda *a, **kw: None)
 
+    # 登录后会补采设备指纹；测试里一律拦下来，避免真的去启动浏览器。
+    # 调用记录挂在 source 上，供断言使用。
+    device_extracts: list[dict] = []
+    saved_device: list[tuple] = []
+
+    def _fake_extract(**kwargs):
+        device_extracts.append(kwargs)
+        return SimpleNamespace(device_info={"ew1": "fake-ua"})
+
+    monkeypatch.setattr(mod, "refresh_device_identity_via_browser", _fake_extract)
+    monkeypatch.setattr(mod, "save_device_info",
+                        lambda info, path: saved_device.append((info, path)))
+
     src = HttpSource(
         decoder=FakeDecoder(),
         sign_provider=FakeSignProvider(sign_value),
@@ -112,6 +126,8 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
         experiment_risk_cooldown_seconds=experiment_risk_cooldown_seconds,
         device_info_path="/fake/device-info.json",
     )
+    src._test_device_extracts = device_extracts
+    src._test_saved_device = saved_device
 
     # 替换 requests.get（baseInfo 调用）返回我们给的 body
     responses = []
@@ -479,6 +495,70 @@ def test_interactive_login_delegates_to_chrome_fallback(monkeypatch):
     assert src._cookie_header == "1&_token=tok"
     assert src._authenticated is True
     assert saved["c"] == cookies
+
+
+def _login_fallback(cookies):
+    class _Fallback:
+        def interactive_login(self):
+            return "/fake/profile"
+
+        def take_login_cookies(self):
+            return list(cookies)
+    return _Fallback()
+
+
+_LOGIN_COOKIES = [{"name": "1&_token", "value": "tok",
+                   "domain": ".ximalaya.com", "path": "/"}]
+
+
+def test_login_collects_device_info_when_missing(monkeypatch):
+    """指纹缺失时 PySignProvider 会静默回退到内置 Chrome/Windows 模板，
+    等于给刚登录的会话配一副与本机、与所用浏览器都不符的指纹。登录后补采一次。"""
+    src = _make_http_source(monkeypatch)
+    src._chrome_fallback = _login_fallback(_LOGIN_COOKIES)
+    src._browser = "edge"
+
+    src.interactive_login()
+
+    assert len(src._test_device_extracts) == 1
+    call = src._test_device_extracts[0]
+    # 只读采集：不清设备态、不用临时 Profile，且跟随当前浏览器与 Profile。
+    assert call["clear_device_state"] is False
+    assert call["fresh_profile"] is False
+    assert call["browser"] == "edge"
+    assert call["profile_dir"] == "/fake/profile"
+    assert src._test_saved_device == [({"ew1": "fake-ua"}, "/fake/device-info.json")]
+
+
+def test_login_keeps_existing_device_info(monkeypatch, tmp_path):
+    """用户已经采过（或手工放置）的指纹，登录不得覆盖。"""
+    existing = tmp_path / "device-info.json"
+    existing.write_text("{}", encoding="utf-8")
+    src = _make_http_source(monkeypatch)
+    src._device_info_path = str(existing)
+    src._chrome_fallback = _login_fallback(_LOGIN_COOKIES)
+
+    src.interactive_login()
+
+    assert src._test_device_extracts == []
+    assert src._test_saved_device == []
+
+
+def test_login_survives_device_info_failure(monkeypatch, capsys):
+    """采集失败有内置模板兜底，不该让一次已经成功的登录变成失败。"""
+    import xdl.adapters.source_http as mod
+
+    src = _make_http_source(monkeypatch)
+    src._chrome_fallback = _login_fallback(_LOGIN_COOKIES)
+    monkeypatch.setattr(mod, "refresh_device_identity_via_browser",
+                        lambda **kw: (_ for _ in ()).throw(
+                            RuntimeError("playwright 未安装")))
+
+    assert src.interactive_login() == "/fake/profile"
+    assert src._authenticated is True
+    out = capsys.readouterr().out
+    assert "设备指纹采集失败" in out
+    assert "extract-device" in out
 
 
 def test_interactive_login_without_token_fails_without_overwriting_cache(monkeypatch):

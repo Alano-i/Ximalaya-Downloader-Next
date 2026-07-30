@@ -48,12 +48,14 @@ WebUI 在 `frontends` 内进一步分成三层：FastAPI 只负责输入校验�
 
 ### 3.1 登录态
 
-`xdl login` 通过 `ChromeSource.interactive_login()` 打开专用 Chrome。验证分两步：
+`xdl login` 通过 `ChromeSource.interactive_login()` 打开专用浏览器（Chrome 或 Edge；同为 Chromium，CDP 行为一致，由 `Settings.browser` 决定，`auto` 时 Chrome 优先）。验证分两步：
 
 1. 在活动浏览器上下文中确认存在非空的 `*&_token` Cookie，并在关闭前捕获全部目标域 Cookie。
-2. 正常关闭 Chrome 后，以只读方式检查 Cookie 数据库，确认 token 已写入磁盘。
+2. 正常关闭浏览器后，以只读方式检查 Cookie 数据库，确认 token 已写入磁盘。
 
-`HttpSource.interactive_login()` 直接接收活动登录上下文捕获的 Cookie，并只在确认登录 token 存在时原子更新 `~/.xdl/cookies.json`。登录后不会为了导出 Cookie 再次启动 Profile，避免会话 Cookie 跨重启丢失，也避免 Playwright 的测试凭据存储参数与系统 Chrome 的 Cookie 加密密钥不一致。匿名结果不会覆盖已有的有效缓存。
+`HttpSource.interactive_login()` 直接接收活动登录上下文捕获的 Cookie，并只在确认登录 token 存在时原子更新该浏览器的 Cookie 缓存（`~/.xdl/{browser}-cookies.json`）。登录后不会为了导出 Cookie 再次启动 Profile，避免会话 Cookie 跨重启丢失，也避免 Playwright 的测试凭据存储参数与系统浏览器的 Cookie 加密密钥不一致。匿名结果不会覆盖已有的有效缓存。
+
+专用 Profile 按浏览器分目录（`~/.xdl/chrome-profile` / `~/.xdl/edge-profile`）：Chromium 系 Cookie 用各浏览器自己的系统凭据存储加密（macOS Keychain / Windows DPAPI），跨浏览器打开同一 Profile 无法解密，启动时还会删除解密失败的 Cookie 行，因此两个浏览器绝不共享同一目录。Cookie 缓存与设备信息是该 Profile 的派生产物（Cookie 导出含 `_xmLog`/`wfp` 等设备指纹 Cookie，`device_info.ew1` 编码了完整 UA），同样按浏览器分文件保存，避免把一个浏览器的会话配上另一个浏览器的指纹。旧布局的 `cookies.json` / `device-info.json` 在启动时自动改名为 `chrome-*`。
 
 ### 3.2 `xm-sign`
 
@@ -72,7 +74,7 @@ device_info
 
 每次 `sign()` 进行一次设备上报，并使用该响应成对返回的 `cadd` 与 `sid`。旧的 `cadd` 缓存没有减少上报次数，还可能组合不匹配的数据，已移除内部缓存逻辑；兼容构造参数仍暂时保留。
 
-设备信息优先读取 `~/.xdl/device-info.json`，文件不存在或不可读时使用包内 `device_info_default.json`。`Zf5` 在每次上报前更新为当前毫秒时间戳。加载设备信息时会对明显异常的 UA 字段做规范化，使上报载荷与常规浏览器形态一致；这不替代登录或内容授权。
+该浏览器首次登录成功后会从同一 Profile 只读采集一次设备信息（不清设备态、不用临时 Profile），使身份三件套一次齐备；采集失败只告警，不影响已完成的登录。设备信息优先读取当前浏览器的 `~/.xdl/{browser}-device-info.json`，文件不存在或不可读时使用包内 `device_info_default.json`。`Zf5` 在每次上报前更新为当前毫秒时间戳。加载设备信息时会对明显异常的 UA 字段做规范化，使上报载荷与常规浏览器形态一致；这不替代登录或内容授权。
 
 ### 3.3 HTTP 音源
 
@@ -90,9 +92,9 @@ device_info
 
 可选实验功能：`Settings.experiment_rotate_device_on_risk`（CLI：`--experiment-rotate-device`）开启时，在识别到风控后可刷新本地设备信息并重试当前曲。默认关闭；其余参数见 `Settings`。该能力不保证恢复可用，也不构成对平台访问控制的绕过。
 
-### 3.4 Chrome 兼容音源
+### 3.4 浏览器 CDP 兼容音源
 
-`--source-backend chrome` 选择 `ChromeSource`。它启动 Chrome 后通过 CDP 连接，以只读网络响应监听取得目标 `baseInfo`；页面没有自行请求时会点击播放控件。
+`--source-backend chrome` 选择 `ChromeSource`。它启动浏览器（Chrome 或 Edge，跟随 `--browser`/`Settings.browser`）后通过 CDP 连接，以只读网络响应监听取得目标 `baseInfo`；页面没有自行请求时会点击播放控件。
 
 该路径保留登录、诊断和兼容价值，但历史观测表明 CDP 环境可能被平台识别，因此不是默认下载实现。旧的设备状态重置实验默认关闭，也不在登录流程执行。
 
@@ -137,7 +139,9 @@ device_info
 
 `config.paths.xdl_home()` 是用户数据目录的单一来源，默认 `~/.xdl`，可由 `XDL_HOME` 覆盖。`Settings` 使用它生成 Profile、Cookie、任务库、设备信息和风控日志路径。
 
-命令行当前可覆盖下载目录、音源后端、异步并发数，以及实验开关 `--experiment-rotate-device`。并发数必须大于 `0`；无效并发数或后端值会快速报错，不会静默修正或退回 Chrome。设备信息相关细项通过 Python `Settings` 配置。
+命令行当前可覆盖下载目录、浏览器（`--browser auto|chrome|edge`，默认 auto 即 Chrome 优先、Edge 兜底）、音源后端、异步并发数，以及实验开关 `--experiment-rotate-device`。并发数必须大于 `0`；无效并发数、浏览器或后端值会快速报错，不会静默修正或退回。设备信息相关细项通过 Python `Settings` 配置。
+
+`Settings.__post_init__` 按 `browser` 解析出实际浏览器（显式 `chrome_path` 优先，否则自动探测），并派生专用 Profile 默认目录（`{browser}-profile`）；WebUI 设置页切换浏览器时，仍为自动探测值的路径会跟随重新派生，自定义路径保持不变。
 
 ## 8. 测试边界
 

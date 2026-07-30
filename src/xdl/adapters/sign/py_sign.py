@@ -297,6 +297,13 @@ class PySignProvider:
             except (OSError, ValueError) as e:
                 print(f"[warn] 设备指纹文件 {path} 读取失败 ({e})，回退到内置模板。")
         if info is None:
+            # 内置模板是固定的 Chrome 125 / Windows 指纹，与本机系统和实际所用
+            # 浏览器都未必相符。正常登录流程会自动采集，走到这里说明采集失败或
+            # 用户指定了不存在的路径——必须说出来，否则错配是完全静默的。
+            if path:
+                print(f"[warn] 设备指纹文件 {path} 不存在，回退到内置模板"
+                      "（Chrome/Windows，与本机不符时更容易触发风控）。"
+                      "可运行 `xdl extract-device` 采集本机指纹。")
             info = sign_conf.load_default_device_info()
         cleaned, changed = sanitize_device_info(info)
         if changed:

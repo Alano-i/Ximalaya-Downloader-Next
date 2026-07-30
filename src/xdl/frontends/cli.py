@@ -12,6 +12,7 @@ from ..application import Facade
 from ..application.diagnostics import (extract_device_identity,
                                        generate_signatures,
                                        refresh_login_cookies)
+from ..config import paths, platform
 from ..settings import Settings
 from ..errors import XdlError, CancelledByUser
 from ..risk import summarize_risk_events
@@ -51,9 +52,27 @@ class ConsoleProgress:
 
 def _cmd_login(app: Facade, args) -> int:
     path = app.login()
-    print(f"登录成功，登录态已保存: {path}")
+    settings = getattr(args, "settings", None)
+    if settings is not None:
+        name = platform.browser_display_name(
+            getattr(settings, "resolved_browser", "chrome"))
+        print(f"登录成功（浏览器: {name}），登录态已保存: {path}")
+        print(f"凭据缓存: {settings.cookies_cache_path}")
+    else:
+        print(f"登录成功，登录态已保存: {path}")
+    _maybe_print_browser_hint(args)
     print("现在可以直接运行 `xdl track`、`xdl album` 或 `xdl resume`。")
     return 0
+
+
+def _maybe_print_browser_hint(args) -> None:
+    """双浏览器机器且未显式选择时提示如何切换（浏览器选择只在登录时与用户相关）。"""
+    if getattr(args, "browser", None):
+        return
+    if platform.find_chrome() and platform.find_edge():
+        print("提示：检测到同时安装了 Chrome 与 Edge，当前使用 Chrome；"
+              "如需改用 Edge，请加全局参数 `--browser edge`"
+              "（每个浏览器的登录态与指纹各自独立保存，互不覆盖）。")
 
 
 def _cmd_track(app: Facade, args) -> int:
@@ -159,8 +178,8 @@ def _cmd_gen_sign(app: Facade, args) -> int:
 
 
 def _cmd_extract_device(app: Facade, args) -> int:
-    """从 Chrome Profile 提取 du_web_sdk 设备指纹到 JSON 文件。"""
-    settings = Settings()
+    """从浏览器专用 Profile 提取 du_web_sdk 设备指纹到 JSON 文件。"""
+    settings = Settings(browser=getattr(args, "browser", None) or "auto")
     result = extract_device_identity(
         settings,
         output=args.output,
@@ -176,8 +195,8 @@ def _cmd_extract_device(app: Facade, args) -> int:
 
 
 def _cmd_refresh_cookies(app: Facade, args) -> int:
-    """从 Chrome Profile 重新提取登录 Cookie 到 ~/.xdl/cookies.json。"""
-    settings = Settings()
+    """从浏览器专用 Profile 重新提取登录 Cookie 到 ~/.xdl/cookies.json。"""
+    settings = Settings(browser=getattr(args, "browser", None) or "auto")
     result = refresh_login_cookies(settings, headless=not args.no_headless)
     print(f"已保存 {result['cookie_count']} 个 Cookie 到 "
           f"{result['output_path']}（已登录）")
@@ -202,8 +221,11 @@ def _print_album_result(result) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="xdl", description="喜马拉雅音频下载器")
     parser.add_argument("--download-dir", help="下载目录（默认 ./downloads）")
+    parser.add_argument("--browser", choices=["auto", "chrome", "edge"],
+                        help="登录/采集所用浏览器：auto（默认，Chrome 优先、Edge 兜底）")
     parser.add_argument("--source-backend", choices=["chrome", "http"],
-                        help="在线音源后端：http（默认，本地 xm-sign）/ chrome（兼容回退）")
+                        help="在线音源后端：http（默认，本地 xm-sign）/ "
+                             "chrome（兼容回退：CDP 接管浏览器，跟随 --browser 选择）")
     parser.add_argument(
         "--concurrency", type=_positive_int, metavar="N",
         help="专辑下载/恢复的异步并发数（默认 1；提高可能触发平台风控）",
@@ -267,7 +289,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_extract = sub.add_parser(
         "extract-device")
     p_extract.add_argument("-o", "--output", help="输出路径（默认 ~/.xdl/device-info.json）")
-    p_extract.add_argument("--profile", help="Chrome 用户目录（默认 ~/.xdl/chrome-profile）")
+    p_extract.add_argument("--profile", help="浏览器用户目录（默认专用 Profile，"
+                                             "如 ~/.xdl/chrome-profile，随 --browser 变化）")
     p_extract.add_argument("--no-headless", action="store_true",
                            help="显示浏览器窗口（调试可见 SDK 加载过程）")
     p_extract.add_argument(
@@ -290,7 +313,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    settings = Settings()
+    # 旧的浏览器无关缓存（~/.xdl/cookies.json 等）搬到 Chrome 布局，
+    # 必须在任何 Settings 派生路径之前完成，否则老用户会被判定为未登录。
+    paths.migrate_legacy_layout()
+    # browser 参与 Settings.__post_init__ 的路径派生（可执行文件探测、专用
+    # Profile 与 Cookie/指纹缓存默认路径），必须在构造时传入，不能事后赋值。
+    settings = Settings(browser=args.browser or "auto")
+    # 供 login 等命令回显实际使用的浏览器与落盘路径。
+    args.settings = settings
     if args.download_dir:
         settings.download_dir = args.download_dir
     if getattr(args, "source_backend", None):

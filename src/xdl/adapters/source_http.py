@@ -31,9 +31,10 @@ from ..risk import RiskEventRecorder
 from .sign.cookies import (build_cookie_header, extract_cookies_from_profile,
                            load_cached_cookies, save_cookies, is_login_cookie,
                            login_cookies_only, strip_device_cookies)
-from .sign.extractor import (identity_fingerprint,
-                             refresh_device_identity_via_browser,
-                             save_device_info, summarize_extract)
+from .sign.extractor import (compare_device_identities, count_device_cookies,
+                             identity_fingerprint, refresh_device_identity_via_browser,
+                             save_device_info, summarize_extract,
+                             summarize_identity_diff)
 from .sign.py_sign import user_agent_from_device_info
 from ._album_list import fetch_album as _fetch_album_list
 
@@ -102,9 +103,11 @@ class HttpSource:
         experiment_browser_fresh_profile: bool = True,
         experiment_rotate_headless: bool | None = False,
         experiment_persist_device_info: bool = True,
-        experiment_strip_device_cookies: bool = True,
+        experiment_strip_device_cookies: bool = False,
         experiment_max_rotations: int = 0,
         experiment_risk_cooldown_seconds: float = 15.0,
+        experiment_require_identity_change: bool = True,
+        experiment_rebirth_rounds: int = 2,
         device_info_path: str = "",
         browser: str = "chrome",
     ):
@@ -145,6 +148,8 @@ class HttpSource:
         self._experiment_strip_cookies = bool(experiment_strip_device_cookies)
         self._experiment_max_rotations = max(0, int(experiment_max_rotations))
         self._experiment_risk_cooldown = max(0.0, float(experiment_risk_cooldown_seconds))
+        self._experiment_require_identity_change = bool(experiment_require_identity_change)
+        self._experiment_rebirth_rounds = max(1, int(experiment_rebirth_rounds or 1))
         self._device_info_path = device_info_path or ""
         if impersonate and not _HAS_CURL_CFFI:
             raise ConfigError(
@@ -498,13 +503,15 @@ class HttpSource:
         self._authenticated = is_login_cookie(installed)
 
     async def rotate_device_identity(self) -> str:
-        """通过真实浏览器重生设备指纹，并可选更新 Cookie。
+        """通过真实浏览器重生设备指纹，并成套更新 Cookie。
 
         更接近「新设备登录同账号」：
         1. 默认用临时全新 Profile（不复用被惩罚的专用 Profile 设备态）；
         2. 只把登录 Cookie 播种进去；
         3. 默认有头采集，避免 HeadlessChrome 写进 device_info；
-        4. 清 storage 后让 du_web_sdk 重生，再采集 device_info。
+        4. 多轮清 storage 后让 du_web_sdk 重生，再采集 device_info；
+        5. 默认保留浏览器导出的设备 Cookie，与新 device_info 成套使用；
+        6. 校验 session 级身份字段是否真的变化，避免“假换身”。
 
         需要 SignProvider 实现 `reload(device_info)`。不保证服务端接受新身份。
         """
@@ -518,7 +525,16 @@ class HttpSource:
                 "换身需要 chrome_profile_dir，或开启 experiment_browser_fresh_profile。"
             )
 
-        # 播种登录态：运行态 cookies（可能已剥离设备）+ 缓存完整导出里的登录项。
+        before_info = None
+        getter = getattr(self._sign, "device_info", None)
+        if callable(getter):
+            try:
+                before_info = getter()
+            except Exception:
+                before_info = None
+
+        # 播种登录态：运行态 cookies + 缓存完整导出里的登录项。
+        # 故意只用 login_cookies_only，避免把旧设备 Cookie 带进新 Profile。
         seed_source = list(self._cookies or [])
         if self._cookies_cache_path:
             try:
@@ -542,9 +558,11 @@ class HttpSource:
             rotate_headless = bool(self._experiment_rotate_headless)
         mode = "headless" if rotate_headless else "headed"
         profile_mode = "fresh-temp" if self._experiment_fresh_profile else "reuse-profile"
+        cookie_mode = "strip-device" if self._experiment_strip_cookies else "paired-device"
         print(
             f"[experiment] 开始真实换身 mode={mode} profile={profile_mode} "
-            f"seed_login={len(seed)}"
+            f"cookies={cookie_mode} seed_login={len(seed)} "
+            f"rebirth_rounds={self._experiment_rebirth_rounds}"
         )
 
         result = await asyncio.to_thread(
@@ -556,11 +574,33 @@ class HttpSource:
             fresh_profile=self._experiment_fresh_profile,
             seed_cookies=seed,
             browser=self._browser,
+            rebirth_rounds=self._experiment_rebirth_rounds,
         )
         print(f"[experiment] 浏览器提取：{summarize_extract(result)}")
-        cookie_note = self._apply_rotated_cookies(result)
 
         new_info = result.device_info
+        identity_diff = compare_device_identities(before_info, new_info)
+        print(f"[experiment] {summarize_identity_diff(identity_diff)}")
+        if (self._experiment_require_identity_change
+                and before_info
+                and not identity_diff.get("meaningful")):
+            raise ConfigError(
+                "换身未改变 session/hardware 身份字段（GJ2/adi/acd/xz7/HW5/DP5 等），"
+                "已中止以免继续使用旧设备画像。可重试换身，或临时关闭 "
+                "experiment_require_identity_change 做诊断。"
+            )
+        if before_info and not identity_diff.get("session_changed"):
+            print(
+                "[warn] 换身后 session 级 ID 未变；若 HW5/DP5 也稳定，"
+                "服务端仍可能把新旧请求关联到同一设备。"
+            )
+        if not self._experiment_strip_cookies and count_device_cookies(result.cookies) == 0:
+            print(
+                "[warn] 成套换身模式下浏览器导出没有设备 Cookie；"
+                "仅更新了 device_info，Cookie 侧可能仍偏旧。"
+            )
+
+        cookie_note = self._apply_rotated_cookies(result)
         await asyncio.to_thread(reload_fn, new_info)
         self._device_rotations += 1
         self._pending_device_info = (
@@ -574,21 +614,24 @@ class HttpSource:
         print(
             f"[experiment] 已换设备指纹 identity={fp} "
             f"(第 {self._device_rotations}/{limit} 次；{cookie_note}; "
-            f"temp_profile={result.used_temp_profile})"
+            f"temp_profile={result.used_temp_profile}; "
+            f"{summarize_identity_diff(identity_diff)})"
         )
         return fp
 
     def _apply_rotated_cookies(self, result) -> str:
         """把浏览器导出的 Cookie 应用到当前 HTTP 会话，返回日志摘要。
 
-        落盘缓存写入剥离前的完整导出（若含登录 token），运行态始终按
-        `experiment_strip_device_cookies` 决定是否去掉设备身份碎片。
+        默认成套模式：保留浏览器导出的设备 Cookie，与新 device_info 一起用。
+        若开启 strip，则只保留登录等业务 Cookie。
+        落盘缓存写入剥离前的完整导出（若含登录 token）。
         """
         cookie_note = "cookies=unchanged"
+        device_n = count_device_cookies(getattr(result, "cookies", None))
         if result.cookies:
             export = list(result.cookies)
             # 仅当导出仍带登录 token 时才覆盖运行态；否则保留旧登录 Cookie，
-            # 只做设备身份剥离，避免 fresh_profile 等路径把会话弄丢。
+            # 避免 fresh_profile 等路径把会话弄丢。
             if is_login_cookie(export) or not self._cookies:
                 if is_login_cookie(export) and self._cookies_cache_path:
                     try:
@@ -598,8 +641,10 @@ class HttpSource:
                 self._install_cookies(
                     export, strip_device=self._experiment_strip_cookies,
                 )
+                mode = "stripped" if self._experiment_strip_cookies else "paired"
                 cookie_note = (
-                    f"cookies=browser_export login={self._authenticated} "
+                    f"cookies=browser_export/{mode} login={self._authenticated} "
+                    f"device_cookies={device_n} "
                     f"cleared={','.join(result.cleared_cookie_names[:8]) or '-'}"
                 )
             else:
@@ -607,7 +652,12 @@ class HttpSource:
                     self._install_cookies(
                         self._cookies, strip_device=True,
                     )
-                cookie_note = "cookies=kept_login_stripped_device(export_lost_token)"
+                    cookie_note = "cookies=kept_login_stripped_device(export_lost_token)"
+                else:
+                    cookie_note = (
+                        f"cookies=kept_login(export_lost_token) "
+                        f"device_cookies_export={device_n}"
+                    )
         elif self._experiment_strip_cookies and self._cookies:
             self._install_cookies(self._cookies, strip_device=True)
             cookie_note = "cookies=stripped_device_only"

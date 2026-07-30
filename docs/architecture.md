@@ -92,6 +92,14 @@ device_info
 
 可选实验功能：`Settings.experiment_rotate_device_on_risk`（CLI：`--experiment-rotate-device`）开启时，在识别到风控后可刷新本地设备信息并重试当前曲。默认关闭；其余参数见 `Settings`。该能力不保证恢复可用，也不构成对平台访问控制的绕过。
 
+更真实的换身默认策略（仍属实验）：
+
+1. 临时全新 Profile，只播种登录 Cookie；
+2. 有头采集，多轮清空 Cookie/storage/CacheStorage 后让 `du_web_sdk` 重生；
+3. 默认**保留**浏览器导出的设备 Cookie，与新 `device_info` 成套使用；
+4. 上报前整理 collector 快照（去掉内部 storage / 嵌套对象，消毒 Headless UA）；
+5. 若 session/hardware 身份字段（如 `GJ2`/`adi`/`acd`/`xz7`/`HW5`/`DP5`）相对换身前完全不变，则判定为假换身并中止，避免继续用旧画像连打。
+
 ### 3.4 浏览器 CDP 兼容音源
 
 `--source-backend chrome` 选择 `ChromeSource`。它启动浏览器（Chrome 或 Edge，跟随 `--browser`/`Settings.browser`）后通过 CDP 连接，以只读网络响应监听取得目标 `baseInfo`；页面没有自行请求时会点击播放控件。

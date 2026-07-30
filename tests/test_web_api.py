@@ -102,6 +102,8 @@ def test_webui_static_shell_is_served():
     assert "下载任务" in page.text
     assert 'name="experiment_risk_cooldown_seconds"' in page.text
     assert 'name="experiment_rotate_headless"' in page.text
+    assert 'name="experiment_require_identity_change"' in page.text
+    assert 'name="experiment_rebirth_rounds"' in page.text
     assert "javascript" in script.headers["content-type"]
     assert "text/css" in styles.headers["content-type"]
 

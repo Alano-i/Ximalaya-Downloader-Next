@@ -146,6 +146,25 @@ def user_agent_from_device_info(device_info: dict | None) -> str | None:
     return f"{wg7}/{yv2}"
 
 
+# Playwright / evaluate 拿到的是 `_deviceInfoCollector` 快照，常夹带 SDK 内部
+# storage 代理与嵌套 collector。真实页面上报 hdaa 时这些字段通常不在载荷里；
+# 原样 POST 会让服务端看到“采集器对象”而非“设备报告”，换身也更容易被粘回旧身份。
+_REPORT_DROP_KEYS = frozenset({
+    "_caddStorage",
+    "_checkdetects",
+    "_checkextensions",
+    "_checkintacts",
+    "_cidStorage",
+    "_getmousetest",
+    "_idstor",
+    "_ipfStorage",
+    "_ipflagStorage",
+    "_pkgStorage",
+    "infoCallback",
+    "url_host",
+})
+
+
 def sanitize_device_info(device_info: dict) -> tuple[dict, bool]:
     """去掉 device_info 中最明显的无头自动化 UA 痕迹。
 
@@ -198,6 +217,35 @@ def sanitize_device_info(device_info: dict) -> tuple[dict, bool]:
 
     if changed:
         info["ew1"] = ew1
+    return info, changed
+
+
+def prepare_device_info_for_report(device_info: dict) -> tuple[dict, bool]:
+    """把浏览器 collector 快照整理成更接近真实 hdaa 上报的载荷。
+
+    1. 去掉 HeadlessChrome 等自动化 UA 痕迹；
+    2. 丢掉 SDK 内部 storage / 嵌套 collector 字段；
+    3. 不改写 HW5/GJ2 等设备身份键——那些只能由浏览器侧重生。
+
+    Returns:
+        (prepared_copy, changed)
+    """
+    if not isinstance(device_info, dict) or not device_info:
+        return device_info, False
+    cleaned, ua_changed = sanitize_device_info(device_info)
+    if not isinstance(cleaned, dict):
+        return cleaned, ua_changed
+    info = copy.deepcopy(cleaned)
+    dropped = [key for key in list(info.keys()) if key in _REPORT_DROP_KEYS]
+    for key in dropped:
+        info.pop(key, None)
+    # 嵌套在其它容器里的同名内部对象也去掉（防御性）。
+    for key, value in list(info.items()):
+        if isinstance(value, dict) and key.startswith("_"):
+            info.pop(key, None)
+            if key not in dropped:
+                dropped.append(key)
+    changed = ua_changed or bool(dropped)
     return info, changed
 
 
@@ -270,7 +318,7 @@ class PySignProvider:
         - 传入 dict：使用该深拷贝，不写回磁盘。
 
         供 HTTP 路径「换身」实验调用；默认下载链路不会自动调用。
-        传入的 dict 会先做 HeadlessChrome UA 消毒，避免换身把无头痕迹写回。
+        传入的 dict 会先做上报载荷整理（UA 消毒 + 去掉 collector 内部字段）。
         """
         with self._lock:
             if device_info is None:
@@ -278,11 +326,11 @@ class PySignProvider:
             else:
                 if not isinstance(device_info, dict) or not device_info:
                     raise SignError("reload 需要非空 device_info dict")
-                cleaned, changed = sanitize_device_info(device_info)
+                cleaned, changed = prepare_device_info_for_report(device_info)
                 if changed:
                     print(
-                        "[warn] 换身得到的 device_info 含 HeadlessChrome，"
-                        "已在内存中改写为 Chrome 后再 reload。"
+                        "[warn] 换身 device_info 已整理为上报载荷"
+                        "（去掉 Headless/内部 collector 字段）。"
                     )
                 self._device_info = cleaned
 
@@ -305,12 +353,12 @@ class PySignProvider:
                       "（Chrome/Windows，与本机不符时更容易触发风控）。"
                       "可运行 `xdl extract-device` 采集本机指纹。")
             info = sign_conf.load_default_device_info()
-        cleaned, changed = sanitize_device_info(info)
+        cleaned, changed = prepare_device_info_for_report(info)
         if changed:
             print(
-                "[warn] device_info 含 HeadlessChrome 自动化 UA；"
-                "已在上报前改写为 Chrome。"
-                "建议用有头浏览器重新 `xdl extract-device --no-headless`。"
+                "[warn] device_info 已整理为上报载荷"
+                "（Headless UA 消毒 / 去掉 collector 内部字段）。"
+                "若仍含 Headless 痕迹，建议 `xdl extract-device --no-headless`。"
             )
         return cleaned
 
@@ -327,9 +375,12 @@ class PySignProvider:
         )
 
     def _fresh_report(self) -> tuple[str, str]:
-        """单次 hdaa 上报：刷新 Zf5 → 上报 → 解析 (cadd, sid)。"""
+        """单次 hdaa 上报：整理载荷 → 刷新 Zf5 → 上报 → 解析 (cadd, sid)。"""
         assert self._device_info is not None
-        payload_device = _refresh_zf5(self._device_info)
+        # 防御：即便调用方直接改了内存中的 collector 快照，上报前再清一次内部字段。
+        prepared, _ = prepare_device_info_for_report(self._device_info)
+        self._device_info = prepared
+        payload_device = _refresh_zf5(prepared)
         try:
             body = _process_payload(payload_device, self._key)
         except Exception as e:

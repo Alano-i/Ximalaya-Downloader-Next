@@ -18,6 +18,7 @@ from xdl.adapters.sign.py_sign import (PySignProvider, _aes_encrypt,
                                          _aes_decrypt, _process_payload,
                                          _refresh_zf5, _json_dumps_compact,
                                          _encode_le3, _atbash,
+                                         prepare_device_info_for_report,
                                          sanitize_device_info,
                                          user_agent_from_device_info)
 from xdl.config import sign as sign_conf
@@ -81,12 +82,52 @@ def test_sanitize_device_info_noop_when_already_clean():
     assert cleaned["ew1"]["yV2"] == info["ew1"]["yV2"]
 
 
+def test_prepare_device_info_for_report_drops_collector_internals():
+    info = sign_conf.load_default_device_info()
+    # 模板本身带内部字段；整理后应去掉，且不改身份键
+    prepared, changed = prepare_device_info_for_report(info)
+    assert changed is True
+    for key in (
+        "_caddStorage", "_cidStorage", "_pkgStorage", "_ipfStorage",
+        "_ipflagStorage", "_checkextensions", "_checkdetects",
+        "_checkintacts", "_getmousetest", "_idstor", "infoCallback", "url_host",
+    ):
+        assert key not in prepared
+    assert prepared["HW5"] == info["HW5"]
+    assert prepared["GJ2"] == info["GJ2"]
+    assert prepared["GF9"] == info["GF9"]
+    assert "ew1" in prepared
+    # 原对象不被修改
+    assert "_cidStorage" in info
+
+
+def test_prepare_device_info_for_report_also_strips_headless():
+    raw = {
+        "HW5": "x",
+        "GJ2": "y",
+        "_cidStorage": {"_key": "cmci", "_value": "1"},
+        "ew1": {
+            "Wg7": "Mozilla",
+            "yV2": ("5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "HeadlessChrome/150.0.0.0 Safari/537.36"),
+            "Le3": "will-rewrite",
+        },
+    }
+    prepared, changed = prepare_device_info_for_report(raw)
+    assert changed is True
+    assert "_cidStorage" not in prepared
+    assert "Headless" not in prepared["ew1"]["yV2"]
+    assert "Chrome/150" in prepared["ew1"]["yV2"]
+
+
 def test_load_device_info_sanitizes_headless_file(tmp_path):
     path = tmp_path / "device-info.json"
     payload = {
         "GF9": "2.0.0",
         "Zf5": 0,
         "HW5": "x",
+        "_cidStorage": {"_key": "cmci", "_value": "x"},
         "ew1": {
             "Wg7": "Mozilla",
             "yV2": ("5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -100,6 +141,31 @@ def test_load_device_info_sanitizes_headless_file(tmp_path):
     info = signer.device_info()
     assert "Headless" not in info["ew1"]["yV2"]
     assert "Chrome/150" in user_agent_from_device_info(info)
+    assert "_cidStorage" not in info
+
+
+def test_pysign_sign_payload_excludes_internal_fields(monkeypatch):
+    captured = []
+
+    def fake_post(url, data=None, headers=None, timeout=None, verify=None):
+        import zlib
+        plain = zlib.decompress(_aes_decrypt(data, sign_conf.KEY))
+        captured.append(json.loads(plain.decode("utf-8")))
+        return _fake_report_response("c", "s")
+
+    import xdl.adapters.sign.py_sign as mod
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+
+    dirty = sign_conf.load_default_device_info()
+    assert "_cidStorage" in dirty
+    signer = PySignProvider(device_info_path="/nonexistent/use-template.json")
+    signer.open()
+    # 即使 reload 塞回带内部字段的快照，sign 上报也应清掉
+    signer.reload(dirty)
+    signer.sign()
+    assert captured
+    for key in ("_cidStorage", "_checkextensions", "infoCallback", "url_host"):
+        assert key not in captured[0]
 
 
 def test_refresh_zf5_updates_timestamp_for_default_template():

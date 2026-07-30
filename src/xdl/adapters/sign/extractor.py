@@ -50,6 +50,7 @@ async () => {
     sessionStorageCleared: 0,
     indexedDB: [],
     indexedDBError: null,
+    cacheStorageCleared: 0,
   };
   try {
     result.localStorageCleared = localStorage.length;
@@ -79,6 +80,15 @@ async () => {
       result.indexedDBError = "indexedDB.databases() 不可用";
     }
   } catch (e) { result.indexedDBError = String(e); }
+  try {
+    if (window.caches && caches.keys) {
+      const keys = await caches.keys();
+      for (const key of keys) {
+        try { await caches.delete(key); result.cacheStorageCleared += 1; }
+        catch (e) {}
+      }
+    }
+  } catch (e) { result.cacheStorageError = String(e); }
   return result;
 }
 """
@@ -247,6 +257,21 @@ def extract_device_info(
     return result.device_info
 
 
+def _wait_for_collector(page, timeout_ms: int = 15000, poll_ms: int = 400) -> dict:
+    """轮询直到 du_web_sdk collector 暴露，避免固定 sleep 过早读到半成品。"""
+    deadline = time.time() + max(1.0, timeout_ms / 1000.0)
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            return _read_collector(page)
+        except Exception as exc:
+            last_error = exc
+            page.wait_for_timeout(poll_ms)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("等待 du_web_sdk 设备收集器超时。")
+
+
 def refresh_device_identity_via_browser(
     profile_dir: str = "",
     chrome_path: str = "",
@@ -259,6 +284,7 @@ def refresh_device_identity_via_browser(
     post_clear_wait_ms: int = 2500,
     seed_cookies: list[dict] | None = None,
     browser: str = "chrome",
+    rebirth_rounds: int = 2,
 ) -> DeviceExtractResult:
     """打开真实浏览器，可选清设备态后让 du_web_sdk 重生，再采集指纹与 Cookie。
 
@@ -270,6 +296,8 @@ def refresh_device_identity_via_browser(
             上注入后，再让 SDK 生成**新**设备身份，更接近“新设备登录同账号”。
         wait_ms: 页面 load 后等待 SDK 初始化的时间。
         post_clear_wait_ms: 清 storage 后再次 goto 等待 SDK 重生的时间。
+        rebirth_rounds: 清设备态后的“清空→重载→采集”轮数。多轮可避免 SDK
+            在同一文档生命周期里把旧 ID 写回。
 
     Returns:
         DeviceExtractResult：含 device_info、站点 Cookie、清理摘要。
@@ -292,10 +320,11 @@ def refresh_device_identity_via_browser(
         os.makedirs(work_profile, exist_ok=True)
 
     # 全新 Profile 上 SDK 冷启动更慢；默认给更长初始化窗口。
-    if used_temp and wait_ms < 6000:
-        wait_ms = 6000
-    if used_temp and post_clear_wait_ms < 3500:
-        post_clear_wait_ms = 3500
+    if used_temp and wait_ms < 7000:
+        wait_ms = 7000
+    if used_temp and post_clear_wait_ms < 4500:
+        post_clear_wait_ms = 4500
+    rounds = max(1, int(rebirth_rounds or 1))
 
     try:
         cleared: list[str] = []
@@ -326,22 +355,32 @@ def refresh_device_identity_via_browser(
                 page.wait_for_timeout(wait_ms)
 
                 if clear_device_state:
-                    cleared = _clear_device_cookies_in_context(ctx, page)
-                    try:
-                        storage_report = page.evaluate(_CLEAR_STORAGE_JS)
-                    except Exception as e:
-                        storage_report = {"error": str(e)}
-                    # 若清 Cookie 误伤了登录态，把播种 Cookie 再补回去。
-                    if seed_list:
+                    for round_idx in range(rounds):
+                        cleared = list(dict.fromkeys(
+                            cleared + _clear_device_cookies_in_context(ctx, page)
+                        ))
                         try:
-                            ctx.add_cookies(seed_list)
-                        except Exception:
-                            pass
-                    # 清完后重新加载，让 SDK 在空 storage 上生成新设备身份
-                    page.goto(url, wait_until="load", timeout=timeout_ms)
-                    page.wait_for_timeout(post_clear_wait_ms)
+                            storage_report = page.evaluate(_CLEAR_STORAGE_JS)
+                        except Exception as e:
+                            storage_report = {"error": str(e)}
+                        # 若清 Cookie 误伤了登录态，把播种 Cookie 再补回去。
+                        if seed_list:
+                            try:
+                                ctx.add_cookies(seed_list)
+                            except Exception:
+                                pass
+                        # 清完后重新加载，让 SDK 在空 storage 上生成新设备身份。
+                        # 多轮重生时用新 page，减少同一 document 生命周期残留。
+                        if round_idx + 1 < rounds:
+                            try:
+                                page.close()
+                            except Exception:
+                                pass
+                            page = ctx.new_page()
+                        page.goto(url, wait_until="load", timeout=timeout_ms)
+                        page.wait_for_timeout(post_clear_wait_ms)
 
-                info = _read_collector(page)
+                info = _wait_for_collector(page, timeout_ms=max(8000, wait_ms + 2000))
                 try:
                     cookies = _filter_site_cookies(ctx.cookies())
                 except Exception:
@@ -355,22 +394,25 @@ def refresh_device_identity_via_browser(
         if info is None:
             raise RuntimeError("未能从浏览器读取设备指纹。")
 
-        # headless 采集会把 HeadlessChrome 写进 UA；落盘/换身前先消毒，
-        # 避免 hdaa 上报持续自证为自动化环境。
+        # headless 采集会把 HeadlessChrome 写进 UA；collector 快照也会夹带
+        # SDK 内部 storage。落盘/换身前整理成上报载荷。
         try:
-            from .py_sign import sanitize_device_info
-            cleaned, changed = sanitize_device_info(info)
+            from .py_sign import prepare_device_info_for_report
+            cleaned, changed = prepare_device_info_for_report(info)
             if changed:
                 info = cleaned
                 print(
-                    "[warn] 提取到的 device_info 含 HeadlessChrome，"
-                    "已改写为 Chrome。建议改用有头模式重新提取。"
+                    "[warn] 提取到的 device_info 已整理为上报载荷"
+                    "（Headless UA 消毒 / 去掉 collector 内部字段）。"
+                    "若仍含 Headless 痕迹，建议改用有头模式重新提取。"
                 )
         except Exception:
             pass
 
         if seeded:
             cleared = list(cleared) + [f"seeded_login={seeded}"]
+        if clear_device_state and rounds > 1:
+            cleared = list(cleared) + [f"rebirth_rounds={rounds}"]
 
         return DeviceExtractResult(
             device_info=info,
@@ -404,6 +446,34 @@ def save_device_info(device_info: dict, path: str) -> None:
             os.unlink(temp_path)
 
 
+# 换身是否“真的换了”的观测字段。session 级 ID 优先；硬件稳定指纹作辅助。
+_SESSION_IDENTITY_FIELDS = (
+    "GJ2",
+    "adi",
+    "acd",
+    "lL1",
+    "fd2.xz7",
+    "fd2.av1",
+)
+_HARDWARE_IDENTITY_FIELDS = (
+    "HW5",
+    "DP5",
+)
+_IDENTITY_COMPARE_FIELDS = _SESSION_IDENTITY_FIELDS + _HARDWARE_IDENTITY_FIELDS
+
+
+def _identity_field_value(device_info: dict | None, field: str) -> str:
+    if not isinstance(device_info, dict):
+        return ""
+    if "." in field:
+        root, child = field.split(".", 1)
+        node = device_info.get(root)
+        if not isinstance(node, dict):
+            return ""
+        return str(node.get(child) or "")
+    return str(device_info.get(field) or "")
+
+
 def identity_fingerprint(device_info: dict) -> str:
     """对关键身份字段做短指纹，便于日志对比（不含完整 device_info）。"""
     parts = [
@@ -415,6 +485,82 @@ def identity_fingerprint(device_info: dict) -> str:
     ]
     raw = "|".join(parts).encode("utf-8", errors="ignore")
     return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def identity_field_snapshot(device_info: dict | None) -> dict[str, str]:
+    """截断后的身份字段快照，只用于日志，不含完整值。"""
+    out: dict[str, str] = {}
+    for field in _IDENTITY_COMPARE_FIELDS:
+        value = _identity_field_value(device_info, field)
+        if not value:
+            out[field] = ""
+        elif len(value) <= 12:
+            out[field] = value
+        else:
+            out[field] = value[:8] + "…" + value[-4:]
+    return out
+
+
+def compare_device_identities(
+    before: dict | None,
+    after: dict | None,
+) -> dict[str, object]:
+    """对比换身前后身份字段，判断是否至少换到了 session 级 ID。
+
+    Returns:
+        {
+          changed_fields: list[str],
+          session_changed: bool,   # GJ2/adi/acd/xz7 等
+          hardware_changed: bool,  # HW5/DP5
+          meaningful: bool,        # session 或 hardware 任一变化
+          before/after: 截断快照
+        }
+    """
+    changed: list[str] = []
+    session_changed = False
+    hardware_changed = False
+    for field in _IDENTITY_COMPARE_FIELDS:
+        left = _identity_field_value(before, field)
+        right = _identity_field_value(after, field)
+        if left != right:
+            changed.append(field)
+            if field in _SESSION_IDENTITY_FIELDS:
+                session_changed = True
+            if field in _HARDWARE_IDENTITY_FIELDS:
+                hardware_changed = True
+    return {
+        "changed_fields": changed,
+        "session_changed": session_changed,
+        "hardware_changed": hardware_changed,
+        "meaningful": session_changed or hardware_changed,
+        "before": identity_field_snapshot(before),
+        "after": identity_field_snapshot(after),
+    }
+
+
+def summarize_identity_diff(diff: dict) -> str:
+    """人类可读的换身差分摘要。"""
+    if not isinstance(diff, dict):
+        return "identity=?"
+    changed = diff.get("changed_fields") or []
+    if not changed:
+        return "identity=unchanged"
+    kind = []
+    if diff.get("session_changed"):
+        kind.append("session")
+    if diff.get("hardware_changed"):
+        kind.append("hardware")
+    label = "+".join(kind) if kind else "other"
+    return f"identity={label} changed={','.join(changed[:8])}"
+
+
+def count_device_cookies(cookies: list[dict] | None) -> int:
+    """导出 Cookie 里设备/统计类条目数量（不读 value）。"""
+    from .cookies import is_device_fingerprint_cookie
+    return sum(
+        1 for cookie in (cookies or [])
+        if is_device_fingerprint_cookie(cookie.get("name"))
+    )
 
 
 def summarize_extract(result: DeviceExtractResult) -> str:
@@ -431,6 +577,9 @@ def summarize_extract(result: DeviceExtractResult) -> str:
             parts.append("IndexedDB: " + ", ".join(str(x) for x in idb[:8]))
     login = "已登录" if is_login_cookie(result.cookies) else "无登录 token"
     parts.append(login)
+    device_n = count_device_cookies(result.cookies)
+    if device_n:
+        parts.append(f"设备Cookie={device_n}")
     if result.used_temp_profile:
         parts.append("临时 Profile")
     return "；".join(parts)

@@ -170,7 +170,10 @@ def test_default_backend_is_local_xm_sign():
 def test_experiment_rotate_defaults_off():
     settings = Settings()
     assert settings.experiment_rotate_device_on_risk is False
-    assert settings.experiment_strip_device_cookies is True
+    # 默认成套换身：保留设备 Cookie，要求身份字段真变，多轮重生。
+    assert settings.experiment_strip_device_cookies is False
+    assert settings.experiment_require_identity_change is True
+    assert settings.experiment_rebirth_rounds == 2
     assert settings.experiment_max_device_rotations == 0
     assert settings.experiment_browser_fresh_profile is True
     assert settings.experiment_rotate_headless is False

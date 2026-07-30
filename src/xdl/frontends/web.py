@@ -84,6 +84,8 @@ class SettingsUpdate(StrictModel):
     experiment_rotate_headless: bool | None = None
     experiment_persist_device_info: bool | None = None
     experiment_strip_device_cookies: bool | None = None
+    experiment_require_identity_change: bool | None = None
+    experiment_rebirth_rounds: int | None = Field(default=None, ge=1, le=5)
     experiment_max_device_rotations: int | None = Field(default=None, ge=0, le=100)
     experiment_risk_cooldown_seconds: float | None = Field(
         default=None, ge=0, le=3600,

@@ -9,9 +9,13 @@ from xdl.adapters.sign.extractor import (
     DeviceExtractResult,
     _clear_device_cookies_in_context,
     _remove_temp_profile,
+    compare_device_identities,
+    count_device_cookies,
+    identity_field_snapshot,
     refresh_device_identity_via_browser,
     save_device_info,
     summarize_extract,
+    summarize_identity_diff,
 )
 from xdl.adapters.sign.cookies import is_login_cookie
 
@@ -46,6 +50,49 @@ def test_summarize_extract_marks_temp_profile_and_anonymous():
     text = summarize_extract(result)
     assert "无登录 token" in text
     assert "临时 Profile" in text
+    assert "设备Cookie=1" in text
+
+
+def test_compare_device_identities_detects_session_change():
+    before = {
+        "HW5": "hw", "DP5": "dp", "GJ2": "old-gj", "adi": "old-adi",
+        "acd": "old-acd", "fd2": {"xz7": "old-xz", "av1": "old-av"},
+    }
+    after = {
+        "HW5": "hw", "DP5": "dp", "GJ2": "new-gj", "adi": "new-adi",
+        "acd": "new-acd", "fd2": {"xz7": "new-xz", "av1": "new-av"},
+    }
+    diff = compare_device_identities(before, after)
+    assert diff["meaningful"] is True
+    assert diff["session_changed"] is True
+    assert diff["hardware_changed"] is False
+    assert "GJ2" in diff["changed_fields"]
+    assert "fd2.xz7" in diff["changed_fields"]
+    assert "unchanged" not in summarize_identity_diff(diff)
+    snap = identity_field_snapshot(after)
+    assert snap["GJ2"].startswith("new-gj") or "…" in snap["GJ2"]
+
+
+def test_compare_device_identities_unchanged():
+    info = {
+        "HW5": "hw", "DP5": "dp", "GJ2": "gj", "adi": "adi",
+        "acd": "acd", "fd2": {"xz7": "xz", "av1": "av"},
+    }
+    diff = compare_device_identities(info, dict(info, fd2=dict(info["fd2"])))
+    assert diff["meaningful"] is False
+    assert diff["changed_fields"] == []
+    assert summarize_identity_diff(diff) == "identity=unchanged"
+
+
+def test_count_device_cookies():
+    cookies = [
+        {"name": "1&_token", "value": "t"},
+        {"name": "_xmLog", "value": "d"},
+        {"name": "crystal", "value": "c"},
+        {"name": "other", "value": "1"},
+    ]
+    assert count_device_cookies(cookies) == 2
+    assert count_device_cookies([]) == 0
 
 
 class _CookieDeleteSession:

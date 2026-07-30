@@ -247,6 +247,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="[实验] 换身是否无头（默认有头；--experiment-rotate-headless 强制无头）",
     )
+    parser.add_argument(
+        "--experiment-strip-device-cookies",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="[实验] 是否剥离设备 Cookie（默认保留，与新 device_info 成套；"
+             "--experiment-strip-device-cookies 强制剥离）",
+    )
+    parser.add_argument(
+        "--experiment-require-identity-change",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="[实验] 换身是否要求 session/hardware 身份字段变化（默认要求）",
+    )
+    parser.add_argument(
+        "--experiment-rebirth-rounds",
+        type=_positive_int,
+        metavar="N",
+        help="[实验] 清 storage 后的重生轮数（默认 2）",
+    )
     sub = parser.add_subparsers(
         dest="command", required=True,
         metavar="{web,login,track,album,resume,gen-sign,risk-report}",
@@ -333,6 +352,16 @@ def main(argv: list[str] | None = None) -> int:
         settings.experiment_risk_cooldown_seconds = float(args.experiment_risk_cooldown)
     if getattr(args, "experiment_rotate_headless", None) is not None:
         settings.experiment_rotate_headless = bool(args.experiment_rotate_headless)
+    if getattr(args, "experiment_strip_device_cookies", None) is not None:
+        settings.experiment_strip_device_cookies = bool(
+            args.experiment_strip_device_cookies
+        )
+    if getattr(args, "experiment_require_identity_change", None) is not None:
+        settings.experiment_require_identity_change = bool(
+            args.experiment_require_identity_change
+        )
+    if getattr(args, "experiment_rebirth_rounds", None) is not None:
+        settings.experiment_rebirth_rounds = int(args.experiment_rebirth_rounds)
     handlers = {
         "web": _cmd_web,
         "login": _cmd_login,

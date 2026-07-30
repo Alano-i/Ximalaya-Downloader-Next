@@ -71,10 +71,12 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
                       cached_cookies=None,
                       chrome_path="/nonexist/chrome",
                       experiment_rotate_device_on_risk=False,
-                      experiment_strip_device_cookies=True,
+                      experiment_strip_device_cookies=False,
                       experiment_max_rotations=0,
                       experiment_persist_device_info=False,
                       experiment_risk_cooldown_seconds=0.0,
+                      experiment_require_identity_change=True,
+                      experiment_rebirth_rounds=2,
                       response_bodies=None):
     """构造一个已经 ready 的 HttpSource（cookies 已加载、跳过浏览器提取）。"""
     cookies = cookies if cookies is not None else [
@@ -124,6 +126,8 @@ def _make_http_source(monkeypatch, sign_value="cadd_xyz&&sid_abc",
         experiment_max_rotations=experiment_max_rotations,
         experiment_persist_device_info=experiment_persist_device_info,
         experiment_risk_cooldown_seconds=experiment_risk_cooldown_seconds,
+        experiment_require_identity_change=experiment_require_identity_change,
+        experiment_rebirth_rounds=experiment_rebirth_rounds,
         device_info_path="/fake/device-info.json",
     )
     src._test_device_extracts = device_extracts
@@ -181,10 +185,10 @@ def _run_async(coro):
 def test_http_source_open_loads_cookies_and_auth_state(monkeypatch):
     src = _make_http_source(monkeypatch)
     _run_async(src.open())
-    # 默认剥离设备 Cookie；登录 token 保留
-    assert src._cookie_header == "1&_token=tok"
-    assert "_xmLog" not in src._cookie_header
-    assert "crystal" not in src._cookie_header
+    # 默认成套模式：保留设备 Cookie + 登录 token
+    assert "1&_token=tok" in src._cookie_header
+    assert "_xmLog=dev" in src._cookie_header
+    assert "crystal=fp" in src._cookie_header
     assert src._authenticated is True
 
 
@@ -641,16 +645,16 @@ def test_interactive_login_without_fallback_raises_config_error():
 
 
 def test_rotate_device_identity_reloads_from_browser(monkeypatch):
-    """换身走真实浏览器提取结果。"""
+    """换身走真实浏览器提取结果；默认成套保留设备 Cookie。"""
     from xdl.adapters.sign.extractor import DeviceExtractResult
 
     src = _make_http_source(
         monkeypatch,
-        experiment_strip_device_cookies=True,
+        experiment_strip_device_cookies=False,
     )
     _run_async(src.open())
-    # open 时已剥离设备 Cookie
-    assert "_xmLog" not in src._cookie_header
+    # 默认成套模式：open 时保留设备 Cookie
+    assert "_xmLog=dev" in src._cookie_header
     assert "1&_token=tok" in src._cookie_header
 
     extracted = {
@@ -688,29 +692,56 @@ def test_rotate_device_identity_reloads_from_browser(monkeypatch):
     assert fp
     assert src._sign.reload_count == 1
     assert src._sign.device_info()["HW5"] == "hw-from-browser"
-    # strip 后浏览器导出的设备 Cookie 不应进入 HTTP Cookie 头
-    assert "_xmLog" not in src._cookie_header
-    assert "crystal" not in src._cookie_header
+    # 成套模式：浏览器导出的新设备 Cookie 进入 HTTP Cookie 头
+    assert "_xmLog=new-dev" in src._cookie_header
+    assert "crystal=new-fp" in src._cookie_header
     assert "1&_token=tok" in src._cookie_header
     assert "other=1" in src._cookie_header
     assert src._device_fingerprint_was_reset is True
     assert src._device_rotations == 1
 
 
-def _patch_browser_rotate(monkeypatch, *, hw: str = "hw-b", capture: dict | None = None):
+def _patch_browser_rotate(monkeypatch, *, hw: str = "hw-b", capture: dict | None = None,
+                          device_info: dict | None = None,
+                          cookies: list | None = None):
     from xdl.adapters.sign.extractor import DeviceExtractResult
     import xdl.adapters.source_http as mod
+
+    calls = {"n": 0}
 
     def _fake(**kwargs):
         if capture is not None:
             capture.update(kwargs)
+        calls["n"] += 1
+        n = calls["n"]
+        if device_info is not None:
+            # 显式传入时保持固定（用于假换身/不变身份测试）
+            info = dict(device_info)
+            if isinstance(device_info.get("fd2"), dict):
+                info["fd2"] = dict(device_info["fd2"])
+        else:
+            # 每次换身返回不同 session/hardware 字段，模拟真重生
+            info = {
+                "HW5": f"{hw}-{n}",
+                "GJ2": f"gj-b-{n}",
+                "DP5": f"dp-b-{n}",
+                "adi": f"adi-{n}",
+                "acd": f"acd-{n}",
+                "ew1": {"yV2": "ua"},
+                "fd2": {"xz7": f"u-{n}", "av1": f"av-{n}"},
+                "Zf5": 1,
+            }
+        export = cookies if cookies is not None else [
+            {"name": "1&_token", "value": "tok",
+             "domain": ".ximalaya.com", "path": "/"},
+            {"name": "_xmLog", "value": f"new-dev-{n}",
+             "domain": ".ximalaya.com", "path": "/"},
+            {"name": "crystal", "value": f"new-fp-{n}",
+             "domain": ".ximalaya.com", "path": "/"},
+        ]
         return DeviceExtractResult(
-            device_info={
-                "HW5": hw, "GJ2": "gj-b", "DP5": "dp-b", "adi": "a",
-                "acd": "c", "ew1": {"yV2": "ua"}, "fd2": {"xz7": "u"}, "Zf5": 1,
-            },
-            cookies=[{"name": "1&_token", "value": "tok",
-                      "domain": ".ximalaya.com", "path": "/"}],
+            device_info=info,
+            cookies=export,
             cleared_cookie_names=["_xmLog"],
             used_temp_profile=bool(kwargs.get("fresh_profile")),
         )
@@ -736,11 +767,11 @@ def test_rotated_device_info_is_persisted_only_after_probe_success(monkeypatch):
     assert _run_async(src._maybe_rotate_after_risk()) is True
 
     assert saved == []
-    assert src._pending_device_info["HW5"] == "hw-b"
+    assert src._pending_device_info["HW5"] == "hw-b-1"
 
     _run_async(src._mark_post_rotate_success())
 
-    assert saved == [("hw-b", "/fake/device-info.json")]
+    assert saved == [("hw-b-1", "/fake/device-info.json")]
     assert src._pending_device_info is None
 
 
@@ -1126,11 +1157,12 @@ def test_login_cookies_only_keeps_auth_not_device():
 
 
 def test_realistic_rotate_uses_fresh_profile_seed_and_headed(monkeypatch):
-    """更真实换身：临时 Profile + 播种登录 Cookie + 默认有头。"""
+    """更真实换身：临时 Profile + 播种登录 Cookie + 默认有头 + 多轮重生。"""
     capture: dict = {}
     src = _make_http_source(
         monkeypatch,
-        experiment_strip_device_cookies=True,
+        experiment_strip_device_cookies=False,
+        experiment_rebirth_rounds=2,
     )
     # 默认设置应偏向真实换身
     src._experiment_fresh_profile = True
@@ -1142,8 +1174,77 @@ def test_realistic_rotate_uses_fresh_profile_seed_and_headed(monkeypatch):
 
     assert capture.get("fresh_profile") is True
     assert capture.get("headless") is False
+    assert capture.get("rebirth_rounds") == 2
     seeds = capture.get("seed_cookies") or []
     assert any(c.get("name") == "1&_token" for c in seeds)
     # 播种不应带设备 Cookie
     assert not any(str(c.get("name", "")).startswith("_xmLog") for c in seeds)
     assert not any(c.get("name") == "crystal" for c in seeds)
+    # 成套模式：换身后运行态应带上新设备 Cookie
+    assert "_xmLog=new-dev-1" in src._cookie_header
+    assert "crystal=new-fp-1" in src._cookie_header
+
+
+def test_rotate_rejects_unchanged_identity_when_required(monkeypatch):
+    """假换身：身份字段完全不变时应中止，避免继续用旧画像。"""
+    from xdl.errors import ConfigError
+
+    src = _make_http_source(
+        monkeypatch,
+        experiment_require_identity_change=True,
+    )
+    # FakeSignProvider 初始 HW5/GJ2/... 与 patch 返回值完全一致
+    same = {
+        "HW5": "hw-original",
+        "GJ2": "gj-original",
+        "DP5": "dp-original",
+        "adi": "adi-original",
+        "acd": "acd-original",
+        "ew1": {"yV2": "Mozilla/5.0"},
+        "fd2": {"xz7": ""},
+        "Zf5": 1,
+    }
+    _patch_browser_rotate(monkeypatch, device_info=same)
+    _run_async(src.open())
+    with pytest.raises(ConfigError, match="未改变"):
+        _run_async(src.rotate_device_identity())
+    assert src._device_rotations == 0
+    assert src._sign.reload_count == 0
+
+
+def test_rotate_allows_unchanged_identity_when_check_disabled(monkeypatch):
+    src = _make_http_source(
+        monkeypatch,
+        experiment_require_identity_change=False,
+    )
+    same = {
+        "HW5": "hw-original",
+        "GJ2": "gj-original",
+        "DP5": "dp-original",
+        "adi": "adi-original",
+        "acd": "acd-original",
+        "ew1": {"yV2": "Mozilla/5.0"},
+        "fd2": {"xz7": ""},
+        "Zf5": 1,
+    }
+    _patch_browser_rotate(monkeypatch, device_info=same)
+    _run_async(src.open())
+    fp = _run_async(src.rotate_device_identity())
+    assert fp
+    assert src._device_rotations == 1
+    assert src._sign.reload_count == 1
+
+
+def test_rotate_can_still_strip_device_cookies_when_enabled(monkeypatch):
+    src = _make_http_source(
+        monkeypatch,
+        experiment_strip_device_cookies=True,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+    # open 时已 strip
+    assert "_xmLog" not in src._cookie_header
+    _run_async(src.rotate_device_identity())
+    assert "_xmLog" not in src._cookie_header
+    assert "crystal" not in src._cookie_header
+    assert "1&_token=tok" in src._cookie_header

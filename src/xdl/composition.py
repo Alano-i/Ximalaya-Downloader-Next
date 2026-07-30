@@ -71,6 +71,8 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             experiment_strip_device_cookies=settings.experiment_strip_device_cookies,
             experiment_max_rotations=settings.experiment_max_device_rotations,
             experiment_risk_cooldown_seconds=settings.experiment_risk_cooldown_seconds,
+            experiment_require_identity_change=settings.experiment_require_identity_change,
+            experiment_rebirth_rounds=settings.experiment_rebirth_rounds,
             device_info_path=settings.device_info_path,
             browser=browser,
         )

@@ -343,16 +343,18 @@
           <details class="settings-details warning-details">
             <summary>实验功能</summary>
             <div class="settings-fields details-fields">
-              <p class="settings-warning">设备身份刷新不保证恢复可用，也不能替代登录或内容授权。</p>
+              <p class="settings-warning">设备身份刷新不保证恢复可用，也不能替代登录或内容授权。默认走成套新身份：临时 Profile、有头采集、多轮重生、保留设备 Cookie；若身份字段完全不变会中止假换身。</p>
               <div class="toggle-grid wide">
                 <label class="switch-row"><input name="experiment_rotate_device_on_risk" type="checkbox"><span>风控后尝试刷新设备身份</span></label>
                 <label class="switch-row"><input name="experiment_browser_clear_state" type="checkbox"><span>采集前清设备状态</span></label>
                 <label class="switch-row"><input name="experiment_browser_fresh_profile" type="checkbox"><span>使用临时新 Profile</span></label>
                 <label class="switch-row"><input name="experiment_rotate_headless" type="checkbox"><span>换身时使用无头浏览器</span></label>
                 <label class="switch-row"><input name="experiment_persist_device_info" type="checkbox"><span>成功后保存设备信息</span></label>
-                <label class="switch-row"><input name="experiment_strip_device_cookies" type="checkbox"><span>刷新时剥离设备 Cookie</span></label>
+                <label class="switch-row"><input name="experiment_require_identity_change" type="checkbox"><span>要求身份字段真正变化</span></label>
+                <label class="switch-row"><input name="experiment_strip_device_cookies" type="checkbox"><span>刷新时剥离设备 Cookie（默认关闭，成套保留）</span></label>
               </div>
               <label class="field-row"><span>换身冷却秒数（0 为不等待）</span><input name="experiment_risk_cooldown_seconds" type="number" min="0" max="3600" step="0.5"></label>
+              <label class="field-row"><span>重生轮数（清 storage 后重载次数）</span><input name="experiment_rebirth_rounds" type="number" min="1" max="5"></label>
               <label class="field-row"><span>最多刷新次数（0 为不限）</span><input name="experiment_max_device_rotations" type="number" min="0"></label>
             </div>
           </details>

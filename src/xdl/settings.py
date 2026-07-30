@@ -80,7 +80,13 @@ class Settings:
     # None = 跟随 chrome_headless；True/False 强制。
     experiment_rotate_headless: bool | None = False
     experiment_persist_device_info: bool = True
-    experiment_strip_device_cookies: bool = True
+    # False（默认）：换身后保留浏览器导出的设备 Cookie，与新 device_info 成套。
+    # True：继续剥掉设备 Cookie，只留登录 token（更激进，也更容易身份平面不一致）。
+    experiment_strip_device_cookies: bool = False
+    # 换身必须至少改变 session/hardware 身份字段之一，否则视为假换身并中止。
+    experiment_require_identity_change: bool = True
+    # 清 storage 后的重生轮数（每轮：删设备 Cookie/storage → 新 page 重载）。
+    experiment_rebirth_rounds: int = 2
     # 0 = 不限次数（换身后首次成功才允许再换；首次仍风控则本会话停用）
     experiment_max_device_rotations: int = 0
     # 命中风控后、换身/探针前的冷却（秒）。0 = 不等待。

@@ -127,6 +127,13 @@ xdl gen-sign --device-info <路径>  # 使用指定设备信息文件
 
 另有默认关闭的实验开关 `--experiment-rotate-device`：在识别到风控后可尝试刷新设备信息并重试当前曲。**不保证**恢复可用，也不构成对平台访问控制的绕过；细项通过 `Settings` 配置。
 
+当前换身默认更偏向“成套新身份”：
+
+- 临时全新 Profile + 只播种登录 Cookie
+- 有头采集，多轮清 storage 后重生
+- **保留**浏览器导出的设备 Cookie（与新 `device_info` 成套；可用 `--experiment-strip-device-cookies` 改回剥离）
+- 上报前去掉 collector 内部字段；若 session/hardware 身份字段完全没变则中止假换身
+
 ### 浏览器 CDP 兼容后端
 
 旧的浏览器/CDP 音源仍作为兼容路径保留，但不推荐日常使用：

@@ -114,25 +114,57 @@ class WebRuntime:
         return {
             "settings": settings_dict(self._settings),
             "login": login_cache_status(self._settings),
-            "operation": self.operation_snapshot(),
+            "operation": self.operation_snapshot(include_result=False),
             "tasks": tasks["tasks"],
             "counts": tasks["counts"],
+            "page": tasks["page"],
             "task_error": tasks.get("error"),
         }
 
-    def operation_snapshot(self) -> dict | None:
+    def operation_snapshot(self, *, include_result: bool = True) -> dict | None:
         with self._lock:
-            return copy.deepcopy(self._operation)
+            snapshot = copy.deepcopy(self._operation)
+        if snapshot is not None and not include_result:
+            snapshot["has_result"] = snapshot.get("result") is not None
+            snapshot.pop("result", None)
+        return snapshot
 
-    def tasks_snapshot(self) -> dict:
+    def tasks_snapshot(self, *, state: str | None = None,
+                       search: str = "", limit: int = 100,
+                       offset: int = 0) -> dict:
         try:
-            rows = self._facade.all_tasks()
-            tasks = [_task_dict(task) for task in rows]
-            return {"tasks": tasks, "counts": _task_counts(tasks)}
+            task_state = TaskState(state) if state else None
+            result = self._facade.query_tasks(
+                state=task_state, search=search,
+                limit=limit, offset=offset,
+            )
+            tasks = [_task_dict(task) for task in result.tasks]
+            counts = {
+                "all": sum(result.counts.values()),
+                **{
+                    task_state.value: result.counts.get(task_state, 0)
+                    for task_state in TaskState
+                },
+            }
+            return {
+                "tasks": tasks,
+                "counts": counts,
+                "page": {
+                    "offset": result.offset,
+                    "limit": result.limit,
+                    "total": result.total,
+                    "has_previous": result.offset > 0,
+                    "has_next": result.offset + len(tasks) < result.total,
+                },
+            }
         except XdlError as exc:
             return {
                 "tasks": [],
                 "counts": _task_counts([]),
+                "page": {
+                    "offset": 0, "limit": limit, "total": 0,
+                    "has_previous": False, "has_next": False,
+                },
                 "error": str(exc),
             }
 

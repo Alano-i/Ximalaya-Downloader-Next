@@ -18,7 +18,7 @@ WebUI 没有远程访问认证，默认只监听回环地址。请勿用 `--host
 
 - 通过专用浏览器 Profile（Chrome 或 Edge）登录，并显示当前登录态。
 - 下载单曲、整张专辑或指定序号区间，选择 `high`、`standard`、`low` 音质。
-- 从 SQLite 展示进行中、待恢复、完成和失败任务，支持状态筛选、搜索和打开对应目录。
+- 从 SQLite 分页展示进行中、待恢复、完成和失败任务，支持状态筛选、服务端搜索和打开对应目录。任务库很大时，页面仍只渲染当前的 100 条记录。
 - 恢复未完成任务；运行中的下载可请求优雅停止，进度保留到任务库和 `.part` 文件。
 - 查看完全离线的风控报告，探测曲目可用格式。
 - 刷新登录 Cookie、检查浏览器存储 key、生成签名和采集设备信息。
@@ -34,9 +34,9 @@ WebUI 没有远程访问认证，默认只监听回环地址。请勿用 `--host
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| `GET` | `/api/bootstrap` | 设置、登录态、任务和当前操作的首屏快照 |
-| `GET` | `/api/tasks` | SQLite 任务列表与状态计数 |
-| `GET` | `/api/operation` | 当前/最近一次长操作、日志和结果 |
+| `GET` | `/api/bootstrap` | 设置、登录态、首个任务页和当前操作的轻量首屏快照 |
+| `GET` | `/api/tasks` | 分页任务列表与全局状态计数；支持 `state`、`search`、`limit`、`offset` |
+| `GET` | `/api/operation` | 当前/最近一次长操作；默认轻量快照，`include_result=true` 按需返回结果 |
 | `GET` | `/api/risk-report` | 本地风控日志汇总 |
 | `POST` | `/api/operations/login` | 启动交互登录 |
 | `POST` | `/api/operations/download` | 启动单曲或专辑下载 |
@@ -49,7 +49,7 @@ WebUI 没有远程访问认证，默认只监听回环地址。请勿用 `--host
 | `POST` | `/api/operations/extract-device` | 采集设备信息 |
 | `PUT` | `/api/settings` | 校验、保存设置并重建运行器 |
 
-长操作返回 `202 Accepted`，前端通过 `/api/operation` 与 `/api/tasks` 获取后续状态。业务错误会返回结构化 `detail`；已有操作占用运行槽时返回 `409 Conflict`。
+长操作返回 `202 Accepted`。前端在操作运行时较快刷新状态，空闲时自动降频；任务页只在到期或操作状态变化时刷新，页面进入后台后完全暂停轮询，回到前台再立即同步。任务内容未变化时不会重建表格，操作的大结果也只在终态读取一次。业务错误会返回结构化 `detail`；已有操作占用运行槽时返回 `409 Conflict`。
 
 ## 本地数据
 

@@ -5,9 +5,21 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from ..domain import Track, Album, DownloadTask
+from ..domain import Track, Album, DownloadTask, TaskState
+
+
+@dataclass(frozen=True)
+class TaskQueryResult:
+    """任务库分页查询结果；筛选、计数和页边界由适配器一次性保证。"""
+
+    tasks: list[DownloadTask]
+    total: int
+    counts: dict[TaskState, int]
+    offset: int
+    limit: int
 
 
 @runtime_checkable
@@ -69,6 +81,8 @@ class TaskStore(Protocol):
     def requeue_retryable_failed(self) -> int: ...
     def pending_albums(self) -> list[tuple[str, str, int]]: ...
     def pending_tasks(self, album_id: str) -> list[DownloadTask]: ...
+    def query_tasks(self, *, state: TaskState | None = None, search: str = "",
+                    limit: int = 100, offset: int = 0) -> TaskQueryResult: ...
     def all_tasks(self) -> list[DownloadTask]: ...
     def save_album_meta(self, album_id: str, title: str, total: int) -> None: ...
     def save_album_cursor(self, album_id: str, cursor: str) -> None: ...

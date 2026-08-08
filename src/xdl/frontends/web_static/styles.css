@@ -653,6 +653,14 @@ input::placeholder {
   border-bottom: 1px solid var(--line);
 }
 
+.task-table-wrap[aria-busy="true"] {
+  cursor: progress;
+}
+
+.task-table-wrap[aria-busy="true"] .task-table {
+  opacity: 0.62;
+}
+
 .task-table {
   width: 100%;
   border-collapse: collapse;
@@ -839,6 +847,55 @@ input::placeholder {
   color: var(--red);
   background: var(--red-soft);
   font-size: 12px;
+}
+
+.task-pagination {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-pagination p {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.pagination-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pagination-actions span {
+  min-width: 74px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.pagination-button {
+  min-height: 32px;
+  padding: 6px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.pagination-button:hover:not(:disabled) {
+  border-color: #9caab5;
+  color: var(--ink);
+}
+
+.pagination-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
 }
 
 .risk-overview,
@@ -1499,6 +1556,16 @@ input::placeholder {
   .task-search {
     width: 100%;
     border-top: 1px solid var(--line);
+  }
+
+  .task-pagination {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 14px 0 4px;
+  }
+
+  .pagination-actions {
+    justify-content: space-between;
   }
 
   .task-table,

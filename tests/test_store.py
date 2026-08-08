@@ -34,11 +34,13 @@ def test_store_migrates_empty_db(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}
         columns = {r[1] for r in conn.execute("PRAGMA table_info(download_task)")}
+        indexes = {r[1] for r in conn.execute("PRAGMA index_list(download_task)")}
     finally:
         conn.close()
-    assert version == "2"
+    assert version == "3"
     assert {"download_task", "album_sync", "meta"} <= tables
     assert {"retryable", "index_width"} <= columns
+    assert "idx_task_state_id" in indexes
 
 
 def test_upsert_pending_dedupes_and_keeps_done(tmp_path):
@@ -115,6 +117,50 @@ def test_progress_and_album_cursor(tmp_path):
         assert store.album_cursor("a") == "cursor-1"
         assert store.album_total("a") == 20
         assert store.pending_albums() == [("a", "专辑", 1)]
+    finally:
+        store.close()
+
+
+def test_query_tasks_pages_filters_searches_and_counts(tmp_path):
+    store = SqliteTaskStore(str(tmp_path / "tasks.db"))
+    try:
+        special = _task("5", album_id="special", index=5)
+        special.title = "100% 特别节目"
+        tasks = store.upsert_pending([
+            _task("1", index=1),
+            _task("2", index=2),
+            _task("3", index=3),
+            _task("4", index=4),
+            special,
+        ])
+        store.mark_downloading(tasks[0].id)
+        store.mark_done(tasks[0].id, "/tmp/one.mp3")
+        store.mark_downloading(tasks[1].id)
+        store.mark_failed(tasks[1].id, "network", "timeout", False)
+        store.mark_downloading(tasks[2].id)
+
+        first = store.query_tasks(limit=2)
+        assert [task.track_id for task in first.tasks] == ["5", "4"]
+        assert first.total == 5
+        assert first.offset == 0
+        assert first.limit == 2
+        assert first.counts == {
+            TaskState.PENDING: 2,
+            TaskState.DOWNLOADING: 1,
+            TaskState.DONE: 1,
+            TaskState.FAILED: 1,
+        }
+
+        last_pending = store.query_tasks(
+            state=TaskState.PENDING, limit=1, offset=999,
+        )
+        assert last_pending.total == 2
+        assert last_pending.offset == 1
+        assert [task.track_id for task in last_pending.tasks] == ["4"]
+
+        searched = store.query_tasks(search="100%")
+        assert searched.total == 1
+        assert [task.track_id for task in searched.tasks] == ["5"]
     finally:
         store.close()
 

@@ -10,11 +10,35 @@ const state = {
   login: null,
   tasks: [],
   counts: {},
+  page: {
+    offset: 0,
+    limit: 100,
+    total: 0,
+    has_previous: false,
+    has_next: false,
+  },
   operation: null,
   taskError: null,
+  taskRenderKey: "",
+  operationRenderKey: "",
+  riskLoaded: false,
   settingsPopulated: false,
   handledTerminals: new Set(),
 };
+
+const polling = {
+  timer: null,
+  running: false,
+  searchTimer: null,
+  taskRequest: 0,
+  lastTaskRefreshAt: 0,
+};
+
+const ACTIVE_OPERATION_POLL_MS = 850;
+const IDLE_OPERATION_POLL_MS = 4000;
+const ACTIVE_TASK_POLL_MS = 1500;
+const IDLE_TASK_POLL_MS = 10000;
+let riskReportPromise = null;
 
 const terminalStatuses = new Set(["succeeded", "failed", "stopped"]);
 const operationLabels = {
@@ -69,7 +93,10 @@ function switchView(view) {
   $$('.nav-item[data-view]').forEach((item) => {
     item.classList.toggle("is-active", item.dataset.view === view);
   });
-  if (view === "diagnostics") loadRiskReport();
+  if (view === "diagnostics" && !state.riskLoaded) loadRiskReport();
+  if (view === "tasks" && Date.now() - polling.lastTaskRefreshAt > IDLE_TASK_POLL_MS) {
+    loadTaskPage();
+  }
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -140,37 +167,68 @@ function renderHeader() {
 function renderCounts() {
   for (const key of ["all", "pending", "downloading", "done", "failed"]) {
     $(`#count-${key}`).textContent = state.counts?.[key] ?? 0;
+    const button = $(`[data-filter="${key}"]`);
+    button?.setAttribute("aria-pressed", String(state.filter === key));
   }
 }
 
-function effectiveTasks() {
-  const query = state.search.trim().toLocaleLowerCase();
-  return state.tasks.filter((task) => {
-    const matchesState = state.filter === "all" || task.state === state.filter;
-    const haystack = `${task.title} ${task.track_id} ${task.album_id}`.toLocaleLowerCase();
-    return matchesState && (!query || haystack.includes(query));
-  });
+function applyTaskPayload(payload, { force = false } = {}) {
+  const renderKey = JSON.stringify([
+    payload.tasks || [], payload.counts || {}, payload.page || {}, payload.error || null,
+  ]);
+  state.tasks = payload.tasks || [];
+  state.counts = payload.counts || {};
+  state.page = { ...state.page, ...(payload.page || {}) };
+  state.taskError = payload.error || null;
+  if (force || renderKey !== state.taskRenderKey) {
+    state.taskRenderKey = renderKey;
+    renderTasks();
+  }
 }
 
 function renderTasks() {
   renderCounts();
   const list = $("#task-list");
   const empty = $("#task-empty");
-  const tasks = effectiveTasks();
+  const tasks = state.tasks;
   list.innerHTML = tasks.map(taskRow).join("");
   empty.classList.toggle("is-hidden", tasks.length > 0);
   if (tasks.length === 0) {
     const heading = $("#task-empty h2");
     const copy = $("#task-empty p");
-    const hasAny = state.tasks.length > 0;
+    const hasAny = Number(state.counts?.all || 0) > 0;
     heading.textContent = hasAny ? "没有符合条件的任务" : "还没有下载任务";
     copy.textContent = hasAny
       ? "切换筛选条件，或尝试搜索其他曲目和 ID。"
       : "粘贴专辑或曲目链接，第一条任务会出现在这里。";
   }
+  renderTaskError();
+  renderPagination();
+}
+
+function renderTaskError() {
   const taskError = $("#task-error");
   taskError.classList.toggle("is-hidden", !state.taskError);
   taskError.textContent = state.taskError ? `任务库暂时不可用：${state.taskError}` : "";
+}
+
+function renderPagination() {
+  const page = state.page;
+  const total = Number(page.total || 0);
+  const limit = Math.max(1, Number(page.limit || 100));
+  const offset = Math.max(0, Number(page.offset || 0));
+  const pageCount = Math.max(1, Math.ceil(total / limit));
+  const pageNumber = total ? Math.floor(offset / limit) + 1 : 1;
+  const start = total ? offset + 1 : 0;
+  const end = Math.min(offset + state.tasks.length, total);
+  const globalTotal = Number(state.counts?.all || 0);
+  const scope = globalTotal !== total ? `，任务库共 ${globalTotal} 条` : "";
+  $("#task-page-summary").textContent = total
+    ? `显示 ${start}–${end}，当前筛选共 ${total} 条${scope}`
+    : `当前筛选没有任务${scope}`;
+  $("#task-page-number").textContent = `第 ${pageNumber} / ${pageCount} 页`;
+  $("#task-page-previous").disabled = !page.has_previous;
+  $("#task-page-next").disabled = !page.has_next;
 }
 
 function taskRow(task) {
@@ -232,6 +290,15 @@ function formatBytes(value) {
   return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 
+function applyOperation(operation, { force = false } = {}) {
+  const renderKey = JSON.stringify(operation || null);
+  state.operation = operation;
+  if (force || renderKey !== state.operationRenderKey) {
+    state.operationRenderKey = renderKey;
+    renderOperation();
+  }
+}
+
 function renderOperation() {
   const panel = $("#operation-strip");
   const operation = state.operation;
@@ -282,12 +349,27 @@ function handleOperationTerminal(operation) {
   } else {
     toast(`${operation.label}已完成`);
   }
-  if (shouldShowResult(operation)) showOperationResult(operation);
+  if (shouldShowResult(operation)) {
+    showOperationResult(operation);
+  } else if (operation.has_result) {
+    loadOperationResult(operation.id);
+  }
   if (["login", "refresh_cookies"].includes(operation.kind) && operation.status === "succeeded") {
     window.setTimeout(() => loadBootstrap(false), 100);
   }
   if (["download_track", "download_album", "resume"].includes(operation.kind)) {
-    window.setTimeout(refreshRuntime, 100);
+    window.setTimeout(() => loadTaskPage(), 100);
+  }
+}
+
+async function loadOperationResult(operationId) {
+  try {
+    const payload = await api("/api/operation?include_result=true");
+    const operation = payload.operation;
+    if (!operation || operation.id !== operationId) return;
+    if (shouldShowResult(operation)) showOperationResult(operation);
+  } catch (error) {
+    console.warn("载入操作结果失败", error);
   }
 }
 
@@ -344,9 +426,9 @@ async function startOperation(path, body = null) {
   try {
     const options = { method: "POST" };
     if (body !== null) options.body = JSON.stringify(body);
-    state.operation = await api(path, options);
-    renderOperation();
+    applyOperation(await api(path, options), { force: true });
     toast(`${state.operation.label || "操作"}已开始`);
+    scheduleRuntimeRefresh(100);
   } catch (error) {
     toast(error.message, "error");
   }
@@ -354,8 +436,8 @@ async function startOperation(path, body = null) {
 
 async function stopOperation() {
   try {
-    state.operation = await api("/api/operations/stop", { method: "POST" });
-    renderOperation();
+    applyOperation(await api("/api/operations/stop", { method: "POST" }), { force: true });
+    scheduleRuntimeRefresh(100);
   } catch (error) {
     toast(error.message, "error");
   }
@@ -378,43 +460,108 @@ async function loadBootstrap(populateSettings = true) {
     const payload = await api("/api/bootstrap");
     state.settings = payload.settings;
     state.login = payload.login;
-    state.operation = payload.operation;
-    state.tasks = payload.tasks || [];
-    state.counts = payload.counts || {};
-    state.taskError = payload.task_error;
     renderHeader();
-    renderTasks();
-    renderOperation();
+    applyOperation(payload.operation, { force: true });
+    if (populateSettings || !state.settingsPopulated) {
+      applyTaskPayload({
+        tasks: payload.tasks,
+        counts: payload.counts,
+        page: payload.page,
+        error: payload.task_error,
+      }, { force: true });
+      polling.lastTaskRefreshAt = Date.now();
+    }
     if (populateSettings || !state.settingsPopulated) populateSettingsForm();
   } catch (error) {
     toast(`无法载入 WebUI：${error.message}`, "error");
   }
 }
 
-async function refreshRuntime() {
+function taskQueryPath() {
+  const params = new URLSearchParams({
+    limit: String(state.page.limit || 100),
+    offset: String(state.page.offset || 0),
+  });
+  if (state.filter !== "all") params.set("state", state.filter);
+  if (state.search.trim()) params.set("search", state.search.trim().slice(0, 200));
+  return `/api/tasks?${params}`;
+}
+
+async function loadTaskPage() {
+  const request = ++polling.taskRequest;
+  $("#task-table-wrap").setAttribute("aria-busy", "true");
   try {
-    const [taskPayload, operationPayload] = await Promise.all([
-      api("/api/tasks"),
-      api("/api/operation"),
-    ]);
-    state.tasks = taskPayload.tasks || [];
-    state.counts = taskPayload.counts || {};
-    state.taskError = taskPayload.error;
-    state.operation = operationPayload.operation;
-    renderTasks();
-    renderOperation();
+    const payload = await api(taskQueryPath());
+    if (request !== polling.taskRequest) return;
+    applyTaskPayload(payload);
+    polling.lastTaskRefreshAt = Date.now();
   } catch (error) {
-    if (!document.hidden) console.warn("刷新运行状态失败", error);
+    if (request !== polling.taskRequest) return;
+    state.taskError = error.message;
+    renderTaskError();
+    $("#task-page-summary").textContent = "刷新失败，已保留当前任务列表";
+  } finally {
+    if (request === polling.taskRequest) {
+      $("#task-table-wrap").setAttribute("aria-busy", "false");
+    }
   }
 }
 
-async function loadRiskReport() {
+async function loadOperationSnapshot() {
   try {
-    const payload = await api("/api/risk-report");
-    renderRiskReport(payload);
+    const payload = await api("/api/operation");
+    applyOperation(payload.operation);
+    return true;
   } catch (error) {
-    toast(error.message, "error");
+    if (!document.hidden) console.warn("刷新运行状态失败", error);
+    return false;
   }
+}
+
+function scheduleRuntimeRefresh(delay = null) {
+  window.clearTimeout(polling.timer);
+  polling.timer = null;
+  if (document.hidden) return;
+  const running = state.operation?.status === "running";
+  polling.timer = window.setTimeout(
+    refreshRuntime,
+    delay ?? (running ? ACTIVE_OPERATION_POLL_MS : IDLE_OPERATION_POLL_MS),
+  );
+}
+
+async function refreshRuntime({ forceTasks = false } = {}) {
+  if (document.hidden || polling.running) return;
+  polling.running = true;
+  const wasRunning = state.operation?.status === "running";
+  try {
+    await loadOperationSnapshot();
+    const isRunning = state.operation?.status === "running";
+    const taskInterval = isRunning ? ACTIVE_TASK_POLL_MS : IDLE_TASK_POLL_MS;
+    const taskDue = Date.now() - polling.lastTaskRefreshAt >= taskInterval;
+    if (forceTasks || wasRunning !== isRunning || taskDue) {
+      await loadTaskPage();
+    }
+  } finally {
+    polling.running = false;
+    scheduleRuntimeRefresh();
+  }
+}
+
+async function loadRiskReport(force = false) {
+  if (state.riskLoaded && !force) return;
+  if (riskReportPromise) return riskReportPromise;
+  riskReportPromise = (async () => {
+    try {
+      const payload = await api("/api/risk-report");
+      renderRiskReport(payload);
+      state.riskLoaded = true;
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      riskReportPromise = null;
+    }
+  })();
+  return riskReportPromise;
 }
 
 function renderRiskReport(payload) {
@@ -498,7 +645,7 @@ async function saveSettings() {
     renderHeader();
     populateSettingsForm();
     toast("设置已保存，运行器已重新加载");
-    window.setTimeout(refreshRuntime, 100);
+    window.setTimeout(() => refreshRuntime({ forceTasks: true }), 100);
   } catch (error) {
     toast(error.message, "error");
   }
@@ -513,6 +660,15 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function changeTaskPage(direction) {
+  const step = Number(state.page.limit || 100);
+  if (direction < 0 && !state.page.has_previous) return;
+  if (direction > 0 && !state.page.has_next) return;
+  state.page.offset = Math.max(0, Number(state.page.offset || 0) + direction * step);
+  loadTaskPage();
+  $("#task-table-wrap").scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
 document.addEventListener("click", (event) => {
   const view = event.target.closest("[data-view]");
   if (view) switchView(view.dataset.view);
@@ -523,8 +679,10 @@ document.addEventListener("click", (event) => {
   const filter = event.target.closest("[data-filter]");
   if (filter) {
     state.filter = filter.dataset.filter;
+    state.page.offset = 0;
     $$('[data-filter]').forEach((button) => button.classList.toggle("is-active", button === filter));
-    renderTasks();
+    renderCounts();
+    loadTaskPage();
   }
 
   const taskButton = event.target.closest("[data-open-task]");
@@ -538,7 +696,9 @@ document.addEventListener("click", (event) => {
     resume: () => startOperation("/api/operations/resume"),
     stop: stopOperation,
     "open-downloads": () => openDownloads(),
-    "refresh-risk": loadRiskReport,
+    "refresh-risk": () => loadRiskReport(true),
+    "tasks-previous": () => changeTaskPage(-1),
+    "tasks-next": () => changeTaskPage(1),
     "refresh-cookies": () => startOperation("/api/operations/refresh-cookies", {
       headless: !$("#cookies-visible").checked,
     }),
@@ -593,14 +753,20 @@ $("#settings-form").addEventListener("change", (event) => {
 
 $("#task-search").addEventListener("input", (event) => {
   state.search = event.target.value;
-  renderTasks();
+  state.page.offset = 0;
+  window.clearTimeout(polling.searchTimer);
+  polling.searchTimer = window.setTimeout(loadTaskPage, 300);
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshRuntime();
+  if (document.hidden) {
+    window.clearTimeout(polling.timer);
+    polling.timer = null;
+  } else {
+    refreshRuntime({ forceTasks: true });
+  }
 });
 
 setDownloadMode("album");
 await loadBootstrap();
-await loadRiskReport();
-window.setInterval(refreshRuntime, 850);
+scheduleRuntimeRefresh(500);

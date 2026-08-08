@@ -9,6 +9,7 @@ from xdl.domain import DownloadTask, TaskState
 from xdl.errors import CancelledByUser
 from xdl.frontends.web_runtime import (OperationBusyError,
                                        WebRuntime)
+from xdl.ports import TaskQueryResult
 from xdl.settings import Settings
 
 
@@ -32,6 +33,26 @@ class FakeFacade:
 
     def all_tasks(self):
         return self.tasks
+
+    def query_tasks(self, *, state=None, search="", limit=100, offset=0):
+        rows = self.tasks
+        if state is not None:
+            rows = [task for task in rows if task.state is state]
+        query = search.casefold().strip()
+        if query:
+            rows = [task for task in rows if query in (
+                f"{task.title} {task.track_id} {task.album_id}".casefold()
+            )]
+        counts = {task_state: 0 for task_state in TaskState}
+        for task in self.tasks:
+            counts[task.state] += 1
+        total = len(rows)
+        if total and offset >= total:
+            offset = ((total - 1) // limit) * limit
+        return TaskQueryResult(
+            tasks=rows[offset:offset + limit], total=total,
+            counts=counts, offset=offset, limit=limit,
+        )
 
     def download_track(self, target, quality=None, reporter=None, cancel=None):
         self.started.set()
@@ -92,6 +113,24 @@ def test_runtime_download_and_task_snapshots(tmp_path):
         "all": 2, "pending": 0, "downloading": 1, "done": 1, "failed": 0,
     }
     assert tasks["tasks"][0]["progress"] == 25
+    assert tasks["page"] == {
+        "offset": 0, "limit": 100, "total": 2,
+        "has_previous": False, "has_next": False,
+    }
+
+
+def test_runtime_filters_and_pages_task_snapshots(tmp_path):
+    runtime = WebRuntime(_settings(tmp_path), facade=FakeFacade(),
+                         persist_settings=False)
+
+    tasks = runtime.tasks_snapshot(
+        state="done", search="第二", limit=1, offset=0,
+    )
+
+    assert [task["track_id"] for task in tasks["tasks"]] == ["12"]
+    assert tasks["page"]["total"] == 1
+    assert tasks["counts"]["all"] == 2
+    assert tasks["counts"]["done"] == 1
 
 
 def test_runtime_enforces_single_operation_and_stops_gracefully(tmp_path):
@@ -121,6 +160,9 @@ def test_runtime_serializes_album_results(tmp_path):
 
     assert finished["result"]["album"]["album_title"] == "测试专辑"
     assert finished["result"]["album"]["downloaded"] == ["a.mp3"]
+    lightweight = runtime.operation_snapshot(include_result=False)
+    assert lightweight["has_result"] is True
+    assert "result" not in lightweight
 
 
 def test_runtime_rebuilds_facade_after_setting_change(tmp_path):

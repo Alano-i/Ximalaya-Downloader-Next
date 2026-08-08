@@ -23,14 +23,27 @@ class FakeRuntime:
             "operation": None,
             "tasks": [],
             "counts": {"all": 0},
+            "page": {
+                "offset": 0, "limit": 100, "total": 0,
+                "has_previous": False, "has_next": False,
+            },
             "task_error": None,
         }
 
-    def operation_snapshot(self):
+    def operation_snapshot(self, *, include_result=True):
+        self.calls.append(("operation", include_result))
         return None
 
-    def tasks_snapshot(self):
-        return {"tasks": [], "counts": {"all": 0}}
+    def tasks_snapshot(self, **kwargs):
+        self.calls.append(("tasks", kwargs))
+        return {
+            "tasks": [], "counts": {"all": 0},
+            "page": {
+                "offset": kwargs.get("offset", 0),
+                "limit": kwargs.get("limit", 100), "total": 0,
+                "has_previous": False, "has_next": False,
+            },
+        }
 
     def risk_report(self):
         return {"path": "risk.jsonl", "summary": {"total": 0}}
@@ -104,6 +117,9 @@ def test_webui_static_shell_is_served():
     assert 'name="experiment_rotate_headless"' in page.text
     assert 'name="experiment_require_identity_change"' in page.text
     assert 'name="experiment_rebirth_rounds"' in page.text
+    assert 'id="task-pagination"' in page.text
+    assert "window.setInterval(refreshRuntime, 850)" not in script.text
+    assert "document.hidden" in script.text
     assert "javascript" in script.headers["content-type"]
     assert "text/css" in styles.headers["content-type"]
 
@@ -121,6 +137,36 @@ def test_web_api_rejects_invalid_download_shape():
         })
 
     assert response.status_code == 422
+
+
+def test_web_api_forwards_bounded_task_query_and_light_operation_snapshot():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        tasks = client.get(
+            "/api/tasks?state=done&search=needle&limit=50&offset=100"
+        )
+        operation = client.get("/api/operation")
+        detailed = client.get("/api/operation?include_result=true")
+
+    assert tasks.status_code == 200
+    assert ("tasks", {
+        "state": "done", "search": "needle", "limit": 50, "offset": 100,
+    }) in runtime.calls
+    assert operation.status_code == 200
+    assert detailed.status_code == 200
+    assert ("operation", False) in runtime.calls
+    assert ("operation", True) in runtime.calls
+
+
+def test_web_api_rejects_unbounded_task_queries():
+    with TestClient(create_app(FakeRuntime())) as client:
+        oversized = client.get("/api/tasks?limit=500")
+        negative = client.get("/api/tasks?offset=-1")
+        unknown = client.get("/api/tasks?state=unknown")
+
+    assert oversized.status_code == 422
+    assert negative.status_code == 422
+    assert unknown.status_code == 422
 
 
 def test_web_api_returns_conflict_for_busy_runtime():

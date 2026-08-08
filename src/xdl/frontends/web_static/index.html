@@ -144,13 +144,13 @@
           <label class="task-search">
             <span class="sr-only">搜索任务</span>
             <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-            <input id="task-search" type="search" placeholder="搜索曲目或 ID">
+            <input id="task-search" type="search" maxlength="200" placeholder="搜索曲目或 ID">
           </label>
         </div>
 
         <div class="inline-alert is-hidden" id="task-error" role="alert"></div>
 
-        <div class="task-table-wrap">
+        <div class="task-table-wrap" id="task-table-wrap" aria-busy="false">
           <table class="task-table">
             <thead>
               <tr>
@@ -171,6 +171,18 @@
             <button class="button secondary" type="button" data-action="focus-composer">添加下载</button>
           </div>
         </div>
+        <nav class="task-pagination" id="task-pagination" aria-label="任务分页">
+          <p id="task-page-summary" aria-live="polite">正在载入任务…</p>
+          <div class="pagination-actions">
+            <button class="pagination-button" id="task-page-previous" type="button" data-action="tasks-previous">
+              上一页
+            </button>
+            <span id="task-page-number">第 1 页</span>
+            <button class="pagination-button" id="task-page-next" type="button" data-action="tasks-next">
+              下一页
+            </button>
+          </div>
+        </nav>
       </section>
 
       <section class="view-panel" id="view-diagnostics" data-view-panel="diagnostics">

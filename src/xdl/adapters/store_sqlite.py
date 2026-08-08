@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from ..domain import DownloadTask, TaskState
 from ..errors import StorageError
+from ..ports import TaskQueryResult
 
 try:  # pragma: no cover - exercised on Unix/macOS in tests via monkeypatch.
     import fcntl
@@ -149,7 +150,16 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
         )
 
 
-_MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2]
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_state_id "
+        "ON download_task(state, id DESC)"
+    )
+
+
+_MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
+    _migrate_v1, _migrate_v2, _migrate_v3,
+]
 
 
 class SqliteTaskStore:
@@ -356,6 +366,66 @@ class SqliteTaskStore:
                 (album_id, TaskState.PENDING.value),
             ).fetchall()
         return [self._row_to_task(r) for r in rows]
+
+    @_wrap_sqlite_errors
+    def query_tasks(self, *, state: TaskState | None = None,
+                    search: str = "", limit: int = 100,
+                    offset: int = 0) -> TaskQueryResult:
+        """返回一个有界任务页，并同时给出全局状态计数。
+
+        WebUI 高频刷新只跨这个查询 seam；即使任务库持续增长，传输和渲染成本
+        也受 ``limit`` 约束。offset 超出尾页时自动回到最后一页，避免任务状态
+        变化后把用户留在一个凭空出现的空页。
+        """
+        limit = max(1, min(200, int(limit)))
+        offset = max(0, int(offset))
+        search = search.strip()
+        where: list[str] = []
+        params: list[object] = []
+        if state is not None:
+            where.append("state=?")
+            params.append(state.value)
+        if search:
+            escaped = (search.replace("\\", "\\\\")
+                       .replace("%", "\\%")
+                       .replace("_", "\\_"))
+            pattern = f"%{escaped}%"
+            where.append(
+                "(title LIKE ? ESCAPE '\\' OR track_id LIKE ? ESCAPE '\\' "
+                "OR album_id LIKE ? ESCAPE '\\')"
+            )
+            params.extend((pattern, pattern, pattern))
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+
+        with self._lock:
+            count_rows = self._conn.execute(
+                "SELECT state, COUNT(*) AS count FROM download_task "
+                "GROUP BY state"
+            ).fetchall()
+            total = int(self._conn.execute(
+                f"SELECT COUNT(*) FROM download_task{clause}", params,
+            ).fetchone()[0])
+            if total and offset >= total:
+                offset = ((total - 1) // limit) * limit
+            rows = self._conn.execute(
+                f"SELECT * FROM download_task{clause} "
+                "ORDER BY id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+
+        counts = {task_state: 0 for task_state in TaskState}
+        for row in count_rows:
+            try:
+                counts[TaskState(str(row["state"]))] = int(row["count"])
+            except ValueError:
+                continue
+        return TaskQueryResult(
+            tasks=[self._row_to_task(row) for row in rows],
+            total=total,
+            counts=counts,
+            offset=offset,
+            limit=limit,
+        )
 
     @_wrap_sqlite_errors
     def all_tasks(self) -> list[DownloadTask]:

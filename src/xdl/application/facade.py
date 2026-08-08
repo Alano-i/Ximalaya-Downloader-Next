@@ -12,8 +12,9 @@ import signal
 import threading
 from collections.abc import Callable
 
-from ..domain import Quality, parse_range, parse_track_id
+from ..domain import Quality, TaskState, parse_range, parse_track_id
 from ..errors import XdlError
+from ..ports import TaskQueryResult
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
                        ResumeUseCase, RetryPolicy, RiskRecoveryPolicy)
@@ -78,6 +79,21 @@ class Facade:
         """只读：返回任务库中的全部任务（供外部界面渲染）。无任务库时返回 []。"""
         store = self._task_store()
         return store.all_tasks() if store is not None else []
+
+    def query_tasks(self, *, state: TaskState | None = None,
+                    search: str = "", limit: int = 100,
+                    offset: int = 0) -> TaskQueryResult:
+        """只读：查询有界任务页；无任务库时返回稳定的空页。"""
+        store = self._task_store()
+        if store is None:
+            return TaskQueryResult(
+                tasks=[], total=0,
+                counts={task_state: 0 for task_state in TaskState},
+                offset=0, limit=limit,
+            )
+        return store.query_tasks(
+            state=state, search=search, limit=limit, offset=offset,
+        )
 
     def close(self) -> None:
         """释放惰性创建的任务库，供常驻前端重载配置或关闭进程。"""

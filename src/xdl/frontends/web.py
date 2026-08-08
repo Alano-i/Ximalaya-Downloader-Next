@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -145,12 +145,22 @@ def create_app(runtime: WebRuntime | None = None) -> FastAPI:
         return service.bootstrap()
 
     @app.get("/api/operation")
-    def operation():
-        return {"operation": service.operation_snapshot()}
+    def operation(include_result: bool = False):
+        return {
+            "operation": service.operation_snapshot(
+                include_result=include_result,
+            )
+        }
 
     @app.get("/api/tasks")
-    def tasks():
-        return service.tasks_snapshot()
+    def tasks(state: Literal["pending", "downloading", "done", "failed"] | None = None,
+              search: str = Query(default="", max_length=200),
+              limit: int = Query(default=100, ge=1, le=200),
+              offset: int = Query(default=0, ge=0)):
+        return service.tasks_snapshot(
+            state=state, search=search,
+            limit=limit, offset=offset,
+        )
 
     @app.get("/api/risk-report")
     def risk_report():

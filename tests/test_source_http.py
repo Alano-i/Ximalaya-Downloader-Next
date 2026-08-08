@@ -10,6 +10,7 @@
 """
 import base64
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -931,6 +932,105 @@ def test_immediate_risk_after_rotate_disables_further_rotation(monkeypatch):
         _run_async(src.get_track("2"))
     assert src._device_rotations == 1
     assert src._sign.reload_count == 1
+
+
+def test_success_after_disable_reenables_further_rotation(monkeypatch):
+    """换身后立即风控被停用，但之后请求成功（如轮询探测）即重新开放换身。"""
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    ok = {
+        "ret": 0,
+        "trackInfo": {
+            "title": "ok",
+            "playUrlList": [{"type": "MP3_64", "url": "enc://ok", "fileSize": 1}],
+        },
+    }
+    # 曲1: risk → rotate → risk(停用)；探测: ok(重新开放)；曲2: risk → rotate → ok
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, risk, ok, risk, ok],
+        experiment_rotate_device_on_risk=True,
+        experiment_max_rotations=0,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+
+    with pytest.raises(RiskControlError):
+        _run_async(src.get_track("1"))
+    assert src._rotate_disabled is True
+
+    # 风控解除后的探测成功 → 换身重新开放
+    assert _run_async(src.get_track("1")).title == "ok"
+    assert src._rotate_disabled is False
+
+    # 再遇风控仍能换身
+    assert _run_async(src.get_track("2")).title == "ok"
+    assert src._device_rotations == 2
+    assert src._sign.reload_count == 2
+
+
+def test_risk_poll_recovery_reenables_rotation_end_to_end(monkeypatch, tmp_path):
+    """自动恢复与自动换身配合：换身后仍风控 → 轮询等待 → 成功重新开放换身 →
+    恢复下载中再遇风控仍能换身。"""
+    risk = {"ret": 1001, "msg": "系统繁忙", "data": {}}
+    ok = {
+        "ret": 0,
+        "trackInfo": {
+            "title": "ok",
+            "playUrlList": [{"type": "MP3_64", "url": "enc://ok", "fileSize": 1}],
+        },
+    }
+    # _make_http_source 会把 os.path.exists 全局改为恒真（拦截 Profile 检查），
+    # 但它也会让用例层的「文件已存在」预扫描误判；先保存真实实现，稍后恢复。
+    real_exists = os.path.exists
+    src = _make_http_source(
+        monkeypatch,
+        response_bodies=[risk, risk, ok, risk, ok],
+        experiment_rotate_device_on_risk=True,
+        experiment_max_rotations=0,
+    )
+    _patch_browser_rotate(monkeypatch)
+    _run_async(src.open())
+
+    import xdl.adapters.source_http as mod
+    monkeypatch.setattr(mod.os.path, "exists", real_exists)
+
+    from xdl.adapters import SqliteTaskStore
+    from xdl.application.usecases import (DownloadAlbumUseCase,
+                                          RetryPolicy, RiskRecoveryPolicy)
+    from xdl.domain import DownloadTask, Quality
+
+    class _Sink:
+        def write(self, url, target_path, reporter, cancel=None,
+                  progress_sink=None, expected_total=0):
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            open(target_path, "w").close()
+
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        task = store.upsert_pending([
+            DownloadTask("1", "123", "第1集", Quality.STANDARD.value, 1),
+        ])[0]
+        uc = DownloadAlbumUseCase(
+            src, _Sink(), str(tmp_path / "downloads"),
+            concurrency=1,
+            retry=RetryPolicy(max_attempts=3, backoff_base=0, cooldown=0,
+                              global_rounds=0),
+            store=store,
+            risk_recovery=RiskRecoveryPolicy(enabled=True, initial_wait=0,
+                                             max_duration=0),
+        )
+        res = _run_async(uc.resume_tasks(
+            "123", "专辑", [task], Quality.STANDARD,
+        ))
+
+        assert len(res.downloaded) == 1 and not res.failed
+        assert res.recovered is True
+        assert src._device_rotations == 2
+        assert src._rotate_disabled is False
+        assert src._rotate_awaiting_success is False
+    finally:
+        store.close()
 
 
 def test_experiment_max_rotations_hard_cap(monkeypatch):

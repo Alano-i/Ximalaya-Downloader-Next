@@ -285,6 +285,11 @@ class HttpSource:
                 if (self._rotate_awaiting_success
                         and request_generation == self._pending_device_generation):
                     await self._mark_post_rotate_success()
+                elif self._rotate_disabled:
+                    # 换身后立即风控曾停用换身；如今请求成功说明风控窗口已过
+                    # （或当前身份可用），重新开放换身，后续再遇风控仍可换身。
+                    self._rotate_disabled = False
+                    print("[experiment] 风控解除后请求成功，重新允许后续换身")
                 return track
             except RiskControlError:
                 if (self._rotate_awaiting_success
@@ -442,6 +447,9 @@ class HttpSource:
 
         若 `_rotate_awaiting_success` 已是 False，说明别的 co-probe 已验证成功，
         本路迟到的风控不得再把会话标成 disable。
+
+        停用是临时的：之后任何一次请求成功（如自动恢复轮询探测）都会视为风控
+        窗口已过，重新开放换身（见 `get_track` 成功路径）。
         """
         if not self._rotate_awaiting_success:
             return

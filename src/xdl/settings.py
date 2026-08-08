@@ -56,6 +56,7 @@ class Settings:
 
     # ---- 在线音源后端（见 architecture §7.1/§7.2） ----
     # "http"（默认：PySignProvider 本地生成 xm-sign，复用已登录 Cookie）
+    # "pc"（PC 桌面端接口：play/v1/show + track/quality，解析链路更简单）
     # "chrome"（兼容后端：由浏览器页面完成请求，仅用于回退与诊断）
     source_backend: str = "http"
     # xm-sign 设备指纹 JSON（默认 ~/.xdl/{browser}-device-info.json）；

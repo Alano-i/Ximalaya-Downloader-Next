@@ -223,7 +223,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--download-dir", help="下载目录（默认 ./downloads）")
     parser.add_argument("--browser", choices=["auto", "chrome", "edge"],
                         help="登录/采集所用浏览器：auto（默认，Chrome 优先、Edge 兜底）")
-    parser.add_argument("--source-backend", choices=["chrome", "http"],
+    parser.add_argument("--source-backend", choices=["chrome", "http", "pc"],
                         help="在线音源后端：http（默认，本地 xm-sign）/ "
                              "chrome（兼容回退：CDP 接管浏览器，跟随 --browser 选择）")
     parser.add_argument(

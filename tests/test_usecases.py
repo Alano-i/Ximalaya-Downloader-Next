@@ -9,7 +9,8 @@ import pytest
 from xdl.adapters import SqliteTaskStore
 from xdl.domain import Album, AlbumTrack, DownloadTask, Track, PlayUrl, Quality
 from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase,
-                                      ResumeUseCase, RetryPolicy)
+                                      ResumeUseCase, RetryPolicy,
+                                      RiskRecoveryPolicy)
 from xdl.errors import (NetworkError, AuthError, ApiError, CancelledByUser,
                         RiskControlError)
 
@@ -419,5 +420,251 @@ def test_resume_uses_persisted_index_width_for_existing_files(tmp_path):
         assert results[0].skipped == [str(existing)]
         assert sink.writes == []
         assert rows[0]["state"] == "done"
+    finally:
+        store.close()
+
+
+# ---- 风控后自动轮询恢复 ----
+
+
+def test_risk_poll_wait_for_is_bounded_and_growing():
+    policy = RiskRecoveryPolicy(initial_wait=10, backoff_factor=2, max_wait=25)
+    waits = [policy.wait_for(i) for i in (1, 2, 3, 4, 5)]
+    assert waits[0] >= 10 and waits[0] < 11
+    assert waits[1] >= 20 and waits[1] < 22
+    assert all(w >= 25 for w in waits[2:])
+    assert RiskRecoveryPolicy(initial_wait=0).wait_for(1) == 0.0
+
+
+def test_album_risk_poll_recovers_and_continues(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album(), behavior={
+            "1": [RiskControlError("系统繁忙", ret=3005), "ok", "ok"],
+        })
+        policy = RiskRecoveryPolicy(enabled=True, initial_wait=0, max_duration=0)
+        uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path / "downloads"),
+                                  retry=FAST, store=store,
+                                  risk_recovery=policy)
+
+        res = run(uc.execute("123", Quality.STANDARD))
+
+        assert len(res.downloaded) == 1 and not res.failed
+        assert res.risk_control is None
+        assert res.recovered is True
+        assert res.risk_wait_seconds == 0.0
+        # 1 次风控 + 1 次探针 + 1 次恢复后重跑
+        assert src.calls["1"] == 3
+        assert [r["state"] for r in _db_rows(db)] == ["done"]
+        assert store.pending_tasks("123") == []
+    finally:
+        store.close()
+
+
+def test_album_risk_poll_multiple_rounds(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album(), behavior={
+            "1": [RiskControlError("a", ret=3005),
+                  RiskControlError("b", ret=3005), "ok", "ok", "ok"],
+        })
+        policy = RiskRecoveryPolicy(enabled=True, initial_wait=0, max_duration=0)
+        uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path / "downloads"),
+                                  retry=FAST, store=store,
+                                  risk_recovery=policy)
+
+        res = run(uc.execute("123", Quality.STANDARD))
+
+        assert len(res.downloaded) == 1 and not res.failed
+        assert res.recovered is True
+        # 批次风控 1 次 + 探针 2 次（第 1 次仍风控）+ 恢复后重跑 1 次
+        assert src.calls["1"] == 4
+    finally:
+        store.close()
+
+
+def test_album_risk_poll_timeout_keeps_deferred(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album(), behavior={
+            "1": [RiskControlError("系统繁忙", ret=3005)],
+        })
+        policy = RiskRecoveryPolicy(enabled=True, initial_wait=0,
+                                    max_duration=0.01)
+        uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path / "downloads"),
+                                  retry=FAST, store=store,
+                                  risk_recovery=policy)
+
+        res = run(uc.execute("123", Quality.STANDARD))
+
+        assert res.risk_control is not None
+        assert res.deferred == 1
+        assert res.recovered is False
+        # 触发项保持 FAILED(retryable)，供人工 resume 恢复
+        rows = _db_rows(db)
+        assert rows[0]["state"] == "failed"
+        assert rows[0]["retryable"] == 1
+    finally:
+        store.close()
+
+
+def test_album_risk_poll_cancel_requeues_tasks(tmp_path, monkeypatch):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album(), behavior={
+            "1": [RiskControlError("系统繁忙", ret=3005)],
+        })
+        # 去掉 worker 的随机错峰，让风控立即发生，再验证「等待中被停止」
+        monkeypatch.setattr("xdl.application.usecases.random.uniform",
+                            lambda _lo, _hi: 0.0)
+        policy = RiskRecoveryPolicy(enabled=True, initial_wait=2,
+                                    max_duration=0)
+
+        async def scenario():
+            stop = asyncio.Event()
+            uc = DownloadAlbumUseCase(
+                src, FakeSink(), str(tmp_path / "downloads"),
+                retry=FAST, store=store, stop_event=stop,
+                risk_recovery=policy,
+            )
+
+            async def _cancel_later():
+                await asyncio.sleep(0.05)
+                stop.set()
+
+            asyncio.create_task(_cancel_later())
+            return await uc.execute("123", Quality.STANDARD)
+
+        res = run(scenario())
+
+        assert res.risk_control is not None
+        assert res.stopped is False       # stopped 由 Facade 层标记
+        # 等待中被停止：任务应回 PENDING，供 resume 继续
+        rows = _db_rows(db)
+        assert rows[0]["state"] == "pending"
+    finally:
+        store.close()
+
+
+def test_album_risk_poll_only_recovers_risk_items(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        album = Album("123", "专辑", total=2, tracks=[
+            AlbumTrack(track_id="1", title="第1集", index=1),
+            AlbumTrack(track_id="2", title="第2集", index=2),
+        ])
+        src = FakeSource(album, behavior={
+            "1": [AuthError("无权访问")],
+            "2": [RiskControlError("系统繁忙", ret=3005), "ok", "ok"],
+        })
+        policy = RiskRecoveryPolicy(enabled=True, initial_wait=0, max_duration=0)
+        uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path / "downloads"),
+                                  retry=FAST, store=store, concurrency=1,
+                                  risk_recovery=policy)
+
+        res = run(uc.execute("123", Quality.STANDARD))
+
+        assert len(res.downloaded) == 1
+        assert [track.track_id for track, _err in res.failed] == ["1"]
+        assert res.risk_control is None
+        assert res.recovered is True
+        assert src.calls["2"] == 3
+    finally:
+        store.close()
+
+
+def test_album_risk_poll_disabled_preserves_old_behavior(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(_one_track_album(), behavior={
+            "1": [RiskControlError("系统繁忙", ret=3005)],
+        })
+        uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path / "downloads"),
+                                  retry=FAST, store=store,
+                                  risk_recovery=RiskRecoveryPolicy())
+        res = run(uc.execute("123", Quality.STANDARD))
+
+        assert res.risk_control is not None
+        assert res.deferred == 1
+        assert res.recovered is False
+        assert src.calls["1"] == 1
+    finally:
+        store.close()
+
+
+def test_track_risk_poll_recovers(tmp_path):
+    src = FakeSource(behavior={
+        "1": [RiskControlError("系统繁忙", ret=3005), "ok", "ok"],
+    })
+    policy = RiskRecoveryPolicy(enabled=True, initial_wait=0, max_duration=0)
+    uc = DownloadTrackUseCase(src, FakeSink(), str(tmp_path), retry=FAST,
+                              risk_recovery=policy)
+
+    path = run(uc.execute("1", Quality.STANDARD))
+
+    assert path.endswith(".mp3")
+    assert src.calls["1"] == 3
+
+
+def test_track_risk_poll_disabled_raises_immediately(tmp_path):
+    src = FakeSource(behavior={"1": [RiskControlError("系统繁忙", ret=3005)]})
+    uc = DownloadTrackUseCase(src, FakeSink(), str(tmp_path), retry=FAST,
+                              risk_recovery=RiskRecoveryPolicy())
+    with pytest.raises(RiskControlError):
+        run(uc.execute("1", Quality.STANDARD))
+    assert src.calls["1"] == 1
+
+
+def test_track_risk_poll_timeout_fails_retryable(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        src = FakeSource(behavior={
+            "1": [RiskControlError("系统繁忙", ret=3005)],
+        })
+        policy = RiskRecoveryPolicy(enabled=True, initial_wait=0,
+                                    max_duration=0.01)
+        uc = DownloadTrackUseCase(src, FakeSink(), str(tmp_path), retry=FAST,
+                                  store=store, risk_recovery=policy)
+        with pytest.raises(RiskControlError):
+            run(uc.execute("1", Quality.STANDARD))
+        # 解析在任务入库之前失败：任务库不受影响（与现有单曲行为一致）
+        assert _db_rows(db) == []
+    finally:
+        store.close()
+
+
+def test_resume_risk_poll_recovers_and_continues_next_album(tmp_path):
+    db = tmp_path / "tasks.db"
+    store = SqliteTaskStore(str(db))
+    try:
+        store.save_album_meta("123", "专辑A", 1)
+        store.save_album_meta("456", "专辑B", 1)
+        store.upsert_pending([
+            DownloadTask("1", "123", "第1集", Quality.STANDARD.value, 1),
+            DownloadTask("2", "456", "第1集", Quality.STANDARD.value, 1),
+        ])
+        src = FakeSource(behavior={
+            "1": [RiskControlError("系统繁忙", ret=3005), "ok", "ok"],
+        })
+        policy = RiskRecoveryPolicy(enabled=True, initial_wait=0, max_duration=0)
+        uc = ResumeUseCase(src, FakeSink(), str(tmp_path / "downloads"),
+                           store, concurrency=1, retry=FAST,
+                           risk_recovery=policy)
+
+        results = run(uc.execute())
+
+        assert len(results) == 2
+        assert results[0].recovered is True
+        assert results[0].risk_control is None
+        assert len(results[0].downloaded) == 1
+        assert len(results[1].downloaded) == 1
+        assert [r["state"] for r in _db_rows(db)] == ["done", "done"]
     finally:
         store.close()

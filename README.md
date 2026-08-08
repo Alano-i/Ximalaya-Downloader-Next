@@ -70,6 +70,7 @@ xdl album <链接或ID>                    # 下载整张专辑
 xdl album <链接或ID> --range 1-20       # 只下载指定区间
 xdl album <链接或ID> --quality high     # high / standard / low
 xdl --concurrency 3 album <链接或ID>    # 自定义异步并发数（默认 1）
+xdl --risk-poll album <链接或ID>        # 风控后自动轮询恢复并继续下载
 xdl resume                             # 恢复未完成任务
 xdl gen-sign                           # 检查本地签名链路
 xdl risk-report                        # 汇总本地风控记录，不发网络请求
@@ -95,6 +96,8 @@ WebUI 默认只监听本机回环地址，没有远程访问认证。不要把�
 - 下载中按 `Ctrl-C` 会保存进度并优雅退出，之后运行 `xdl resume`。
 - 专辑下载和恢复默认使用 `1` 个异步 worker；可用全局参数 `--concurrency N` 调整。
 - 提高并发会同时增加播放信息请求和媒体下载数量，可能更容易触发平台风控；遇到已识别的风控信号会停止整批，同一批次只提示一次，其余项目保留待恢复。
+- 风控自动恢复（默认关闭）：加 `--risk-poll` 后，遇风控且任务未完成时自动等待并探测，风控解除后按原并发继续下载，等待期间不会反复请求；超时后回落为熔断留待 `xdl resume`。
+- 自定义等待参数：`--risk-poll-initial-wait`（首次等待，默认 30s）、`--risk-poll-max-duration`（总等待上限，默认 3600s，0=不限），例如 `xdl --risk-poll --risk-poll-initial-wait 60 --risk-poll-max-duration 1800 album <链接或ID>`；WebUI 在「风控自动恢复」设置区可配置。
 
 ## 默认 HTTP 后端
 

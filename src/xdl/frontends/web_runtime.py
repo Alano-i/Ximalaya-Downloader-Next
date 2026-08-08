@@ -434,6 +434,8 @@ def _album_result_dict(result: AlbumResult) -> dict:
         "stopped": result.stopped,
         "risk_control": result.risk_control,
         "deferred": result.deferred,
+        "recovered": result.recovered,
+        "risk_wait_seconds": result.risk_wait_seconds,
         "summary": result.summary(),
     }
 

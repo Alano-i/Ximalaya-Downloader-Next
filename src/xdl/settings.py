@@ -92,6 +92,15 @@ class Settings:
     # 命中风控后、换身/探针前的冷却（秒）。0 = 不等待。
     experiment_risk_cooldown_seconds: float = 15.0
 
+    # ---- 风控后自动恢复（轮询，默认关闭）----
+    # 命中已识别风控且任务未完成时，进入「等待 → 单探针 → 解除后继续下载」循环；
+    # 等待期间不发任何请求，每个退避周期只发一个探针（真实待下载曲目的 baseInfo）。
+    risk_poll_enabled: bool = False
+    risk_poll_initial_wait: float = 30.0     # 首次探针前等待（秒）
+    risk_poll_backoff_factor: float = 2.0    # 每次仍风控的等待倍增
+    risk_poll_max_wait: float = 900.0        # 单次等待上限（秒）
+    risk_poll_max_duration: float = 3600.0   # 总轮询上限（秒）；0 = 不限
+
     def __post_init__(self):
         if self.max_concurrency < 1:
             raise ConfigError("异步并发数必须是大于 0 的整数。")
@@ -126,3 +135,9 @@ class Settings:
             self.task_db_path = os.path.join(_xdl_home(), "tasks.db")
         if not self.risk_log_path:
             self.risk_log_path = os.path.join(_xdl_home(), "risk-events.jsonl")
+        if self.risk_poll_initial_wait < 0:
+            raise ConfigError("风控轮询首次等待不能为负数。")
+        if self.risk_poll_backoff_factor < 1:
+            raise ConfigError("风控轮询退避倍数必须 >= 1。")
+        if self.risk_poll_max_wait < 0 or self.risk_poll_max_duration < 0:
+            raise ConfigError("风控轮询等待上限不能为负数。")

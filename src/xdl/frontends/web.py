@@ -90,6 +90,11 @@ class SettingsUpdate(StrictModel):
     experiment_risk_cooldown_seconds: float | None = Field(
         default=None, ge=0, le=3600,
     )
+    risk_poll_enabled: bool | None = None
+    risk_poll_initial_wait: float | None = Field(default=None, ge=0, le=86400)
+    risk_poll_backoff_factor: float | None = Field(default=None, ge=1, le=10)
+    risk_poll_max_wait: float | None = Field(default=None, ge=0, le=86400)
+    risk_poll_max_duration: float | None = Field(default=None, ge=0, le=604800)
 
 
 def create_app(runtime: WebRuntime | None = None) -> FastAPI:

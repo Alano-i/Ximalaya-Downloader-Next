@@ -260,6 +260,38 @@ def test_main_passes_custom_concurrency_to_settings(monkeypatch):
     assert captured["settings"].max_concurrency == 3
 
 
+def test_main_passes_risk_poll_flags_to_settings(monkeypatch):
+    import xdl.frontends.cli as cli
+
+    captured = {}
+    app = FakeApp(album_result=AlbumResult("专辑"))
+
+    def fake_from_config(settings):
+        captured["settings"] = settings
+        return app
+
+    monkeypatch.setattr(cli.Facade, "from_config", fake_from_config)
+
+    assert main([
+        "--risk-poll",
+        "--risk-poll-initial-wait", "45",
+        "--risk-poll-max-duration", "7200",
+        "album", "123",
+    ]) == 0
+    assert captured["settings"].risk_poll_enabled is True
+    assert captured["settings"].risk_poll_initial_wait == 45.0
+    assert captured["settings"].risk_poll_max_duration == 7200.0
+
+
+def test_risk_poll_defaults_off():
+    settings = Settings()
+    assert settings.risk_poll_enabled is False
+    assert settings.risk_poll_initial_wait == 30.0
+    assert settings.risk_poll_backoff_factor == 2.0
+    assert settings.risk_poll_max_wait == 900.0
+    assert settings.risk_poll_max_duration == 3600.0
+
+
 def test_local_risk_report_does_not_build_facade(tmp_path, monkeypatch):
     path = tmp_path / "events.jsonl"
     path.write_text("", encoding="utf-8")

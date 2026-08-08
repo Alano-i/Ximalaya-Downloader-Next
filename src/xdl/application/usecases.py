@@ -11,6 +11,7 @@ import asyncio
 import os
 import random
 import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, TypeVar
@@ -46,6 +47,108 @@ class RetryPolicy:
         return base + random.uniform(0, base * 0.3)
 
 
+@dataclass
+class RiskRecoveryPolicy:
+    """风控解除轮询策略（默认关闭）。
+
+    开启后，批次因风控熔断且仍有未完成任务时，进入「等待 → 单探针 → 解除后
+    继续」循环，直到风控解除、超时或被用户停止。等待期间不发任何请求，每个
+    退避周期只发一个探针（对真实待下载曲目调一次受保护接口）。
+    """
+    enabled: bool = False
+    initial_wait: float = 30.0     # 首次探针前等待（秒）
+    backoff_factor: float = 2.0    # 每次仍风控的等待倍增
+    max_wait: float = 900.0        # 单次等待上限（秒）
+    max_duration: float = 3600.0   # 总轮询上限（秒）；0 = 不限
+
+    def wait_for(self, attempt: int) -> float:
+        """第 attempt 轮探针前的等待时长（含轻微抖动，避免机械节奏）。"""
+        if self.initial_wait <= 0:
+            return 0.0
+        wait = self.initial_wait
+        for _ in range(1, attempt):
+            wait *= self.backoff_factor
+            if self.max_wait > 0 and wait >= self.max_wait:
+                wait = self.max_wait
+                break
+        return wait + random.uniform(0, max(wait * 0.1, 1.0))
+
+
+async def _sleep_with_stop(seconds: float, stop_event, cancel_event) -> bool:
+    """分片睡眠以便及时响应停止信号；返回 False 表示被停止。"""
+    if (stop_event is not None and stop_event.is_set()) or \
+            (cancel_event is not None and cancel_event.is_set()):
+        return False
+    remaining = seconds
+    while remaining > 0:
+        await asyncio.sleep(min(remaining, 1.0))
+        remaining -= 1.0
+        if (stop_event is not None and stop_event.is_set()) or \
+                (cancel_event is not None and cancel_event.is_set()):
+            return False
+    return True
+
+
+async def _await_risk_recovery(source: Source, probe_track_ids: list[str],
+                               policy: RiskRecoveryPolicy,
+                               reporter: ProgressReporter | None,
+                               label: str = "",
+                               stop_event: asyncio.Event | None = None,
+                               cancel_event: threading.Event | None = None,
+                               remaining: int = 0) -> tuple[bool, float]:
+    """等待风控解除：每轮先等待，再用一个待下载曲目做探针。
+
+    返回 (是否解除, 累计等待秒数)。等待期间不发请求；一个退避周期只发一个探针。
+    探针项自身的不可恢复错误（AuthError / 非 retryable ApiError）会换下一项，
+    全部耗尽后原样抛出；NetworkError 与可重试 ApiError 按瞬态继续等待。
+    """
+    if not probe_track_ids:
+        return True, 0.0
+    started = time.monotonic()
+    attempt = 0
+    candidates = list(probe_track_ids)
+    while True:
+        attempt += 1
+        wait = policy.wait_for(attempt)
+        suffix = f"，剩余 {remaining} 项待恢复" if remaining else ""
+        _note(reporter, f"  ⏳ {label}风控中，{wait:.0f}s 后探测恢复"
+                        f"（第 {attempt} 次{suffix}）…")
+        if not await _sleep_with_stop(wait, stop_event, cancel_event):
+            _note(reporter, f"  ⏹ {label}已停止等待风控恢复。")
+            return False, time.monotonic() - started
+        if (stop_event is not None and stop_event.is_set()) or \
+                (cancel_event is not None and cancel_event.is_set()):
+            return False, time.monotonic() - started
+        if policy.max_duration > 0 and \
+                time.monotonic() - started >= policy.max_duration:
+            _note(reporter, f"  ⏰ {label}等待风控解除超过 "
+                            f"{policy.max_duration:.0f}s，停止自动恢复，"
+                            "可稍后 resume。")
+            return False, time.monotonic() - started
+        # 一个退避周期只发一个探针；成功即视为风控解除。
+        while candidates:
+            probe_id = candidates[0]
+            try:
+                await source.get_track(probe_id)
+                waited = time.monotonic() - started
+                _note(reporter, f"  ✓ {label}风控已解除"
+                                f"（等待 {waited:.0f}s），继续下载。")
+                return True, waited
+            except RiskControlError:
+                break            # 仍风控：进入下一轮等待
+            except (NetworkError, ApiError) as e:
+                if isinstance(e, ApiError) and not e.retryable:
+                    raise
+                _note(reporter, f"  {label}探针瞬态失败（{e.category}），继续等待。")
+                break
+            except AuthError:
+                _note(reporter, f"  {label}探针项不可恢复（{probe_id}），"
+                                "改用下一项。")
+                candidates.pop(0)
+            except CancelledByUser:
+                raise
+
+
 async def _run_with_retry(fn: Callable[[], Awaitable[_T]], policy: RetryPolicy,
                           reporter: ProgressReporter | None, label: str = "") -> _T:
     """按策略执行 async fn；仅对 retryable 异常重试，否则立即抛出。"""
@@ -57,8 +160,9 @@ async def _run_with_retry(fn: Callable[[], Awaitable[_T]], policy: RetryPolicy,
             raise
         except XdlError as e:
             last = e
-            # 风控的 retryable 仅表示可以在未来的人工 resume 中恢复；当前运行
-            # 必须立即停止，不能把即时重试变成持续冲击。
+            # 风控的 retryable 仅表示可以在恢复后继续；本函数内仍立即停止，
+            # 不能把即时重试变成持续冲击。自动恢复由上层 RiskRecoveryPolicy
+            # 以「等待 + 单探针」的循环处理。
             if isinstance(e, RiskControlError):
                 raise
             if not e.retryable or attempt >= policy.max_attempts:
@@ -74,13 +178,15 @@ class DownloadTrackUseCase:
     def __init__(self, source: Source, sink: MediaSink, download_dir: str,
                  retry: RetryPolicy | None = None,
                  store: TaskStore | None = None,
-                 cancel_event: threading.Event | None = None):
+                 cancel_event: threading.Event | None = None,
+                 risk_recovery: RiskRecoveryPolicy | None = None):
         self._source = source
         self._sink = sink
         self._download_dir = download_dir
         self._retry = retry or RetryPolicy()
         self._store = store
         self._cancel_event = cancel_event
+        self._risk_recovery = risk_recovery or RiskRecoveryPolicy()
 
     async def execute(self, target: str, quality: Quality,
                       reporter: ProgressReporter | None = None) -> str:
@@ -109,14 +215,36 @@ class DownloadTrackUseCase:
                                        task.id, target_path)
             return target_path
 
-        try:
-            return await _run_with_retry(_do, self._retry, reporter)
-        except CancelledByUser:
-            await self._requeue(holder["task"], reporter)
-            raise
-        except XdlError as e:
-            await self._fail(holder["task"], e, reporter)
-            raise
+        while True:
+            try:
+                return await _run_with_retry(_do, self._retry, reporter)
+            except RiskControlError as e:
+                if (not self._risk_recovery.enabled
+                        or (self._cancel_event is not None
+                            and self._cancel_event.is_set())):
+                    await self._fail(holder["task"], e, reporter)
+                    raise
+                try:
+                    recovered, _waited = await _await_risk_recovery(
+                        self._source, [track_id], self._risk_recovery,
+                        reporter, label="单曲 ",
+                        cancel_event=self._cancel_event,
+                    )
+                except AuthError:
+                    auth = AuthError("单曲任务不可恢复（权限或登录问题）。")
+                    await self._fail(holder["task"], auth, reporter)
+                    raise
+                if not recovered:
+                    await self._fail(holder["task"], e, reporter)
+                    raise
+                # 风控解除：重跑整条下载链（任务重新 prepare 为 pending）。
+                continue
+            except CancelledByUser:
+                await self._requeue(holder["task"], reporter)
+                raise
+            except XdlError as e:
+                await self._fail(holder["task"], e, reporter)
+                raise
 
     # ---- 任务库（与专辑逐集流程一致的最小实现） ----
     async def _prepare_task(self, track_id, quality, title, target_path, reporter):
@@ -170,6 +298,8 @@ class AlbumResult:
     stopped: bool = False
     risk_control: str | None = None
     deferred: int = 0
+    recovered: bool = False          # 是否风控后自动恢复并完成
+    risk_wait_seconds: float = 0.0   # 自动恢复累计等待（秒）
 
     def summary(self) -> str:
         line = (f"专辑《{self.album_title}》：下载 {len(self.downloaded)}，"
@@ -177,6 +307,8 @@ class AlbumResult:
         if self.risk_control:
             line += (f"（平台风控已熔断，{self.deferred} 项待恢复："
                      f"{self.risk_control}）")
+        elif self.recovered:
+            line += (f"（风控后自动恢复，等待 {self.risk_wait_seconds:.0f}s 后完成）")
         if self.incomplete:
             line += "（注意：曲目清单未取全，登录后重跑可补齐）"
         return line
@@ -199,7 +331,8 @@ class DownloadAlbumUseCase:
                  concurrency: int = 1, retry: RetryPolicy | None = None,
                  store: TaskStore | None = None,
                  stop_event: asyncio.Event | None = None,
-                 cancel_event: threading.Event | None = None):
+                 cancel_event: threading.Event | None = None,
+                 risk_recovery: RiskRecoveryPolicy | None = None):
         self._source = source
         self._sink = sink
         self._download_dir = download_dir
@@ -208,6 +341,7 @@ class DownloadAlbumUseCase:
         self._store = store
         self._stop_event = stop_event
         self._cancel_event = cancel_event
+        self._risk_recovery = risk_recovery or RiskRecoveryPolicy()
 
     async def execute(self, target: str, quality: Quality,
                       start: int | None = None, end: int | None = None,
@@ -311,8 +445,48 @@ class DownloadAlbumUseCase:
         failures = await self._run_batch(work, quality, album_dir, width, total,
                                          reporter, result)
 
-        # 风控不是普通的逐项失败：首个信号出现后整批熔断，禁止失败收尾轮
-        # 自动重新冲击受保护接口。任务保持 retryable，可在冷却/人工确认后 resume。
+        # 风控不是普通的逐项失败：首个信号出现后整批熔断。若启用了自动恢复，
+        # 进入「等待 → 单探针 → 解除后继续」循环（解除后按原并发继续剩余项，
+        # 期间可能再次风控则继续循环）；否则维持原语义，禁止失败收尾轮自动
+        # 重新冲击受保护接口，任务保持 retryable 供人工 resume。
+        while self._risk_recovery.enabled:
+            risk_items = [item for item, error in failures
+                          if isinstance(error, RiskControlError)]
+            if not risk_items or self._is_stopping():
+                break
+            try:
+                recovered, waited = await _await_risk_recovery(
+                    self._source,
+                    [item.track.track_id for item in risk_items],
+                    self._risk_recovery, reporter,
+                    stop_event=self._stop_event,
+                    cancel_event=self._cancel_event,
+                    remaining=len(risk_items),
+                )
+            except AuthError:
+                # 剩余项全部不可恢复（无权限/登录问题），转为非重试失败。
+                for item in risk_items:
+                    if item.task and item.task.id is not None:
+                        await self._store_call(
+                            reporter, self._store.mark_failed,
+                            item.task.id, "auth",
+                            "剩余任务不可恢复（权限或登录问题）。", False,
+                        )
+                return [(item, AuthError("剩余任务不可恢复（权限或登录问题）。"))
+                        for item in risk_items]
+            if not recovered:
+                if self._is_stopping():
+                    await self._requeue_items(risk_items, reporter)
+                break
+            result.recovered = True
+            result.risk_wait_seconds += waited
+            await self._requeue_items(risk_items, reporter)
+            _note(reporter, f"风控解除，继续下载剩余 {len(risk_items)} 项。")
+            more = await self._run_batch(risk_items, quality, album_dir, width,
+                                         total, reporter, result)
+            failures = [pair for pair in failures
+                        if not isinstance(pair[1], RiskControlError)] + more
+
         if any(isinstance(error, RiskControlError) for _item, error in failures):
             return failures
 
@@ -485,7 +659,8 @@ class ResumeUseCase:
                  store: TaskStore, concurrency: int = 4,
                  retry: RetryPolicy | None = None,
                  stop_event: asyncio.Event | None = None,
-                 cancel_event: threading.Event | None = None):
+                 cancel_event: threading.Event | None = None,
+                 risk_recovery: RiskRecoveryPolicy | None = None):
         self._source = source
         self._sink = sink
         self._download_dir = download_dir
@@ -494,6 +669,7 @@ class ResumeUseCase:
         self._retry = retry or RetryPolicy()
         self._stop_event = stop_event
         self._cancel_event = cancel_event
+        self._risk_recovery = risk_recovery or RiskRecoveryPolicy()
 
     async def execute(self, reporter: ProgressReporter | None = None) -> list[AlbumResult]:
         stale = await self._store_call(reporter, self._store.requeue_stale, default=0)
@@ -512,6 +688,7 @@ class ResumeUseCase:
             self._source, self._sink, self._download_dir,
             concurrency=self._concurrency, retry=self._retry, store=self._store,
             stop_event=self._stop_event, cancel_event=self._cancel_event,
+            risk_recovery=self._risk_recovery,
         )
         results: list[AlbumResult] = []
         await self._source.open()
@@ -547,6 +724,9 @@ class ResumeUseCase:
                     merged.downloaded.extend(partial.downloaded)
                     merged.skipped.extend(partial.skipped)
                     merged.failed.extend(partial.failed)
+                    if partial.recovered:
+                        merged.recovered = True
+                        merged.risk_wait_seconds += partial.risk_wait_seconds
                     if partial.risk_control:
                         merged.risk_control = partial.risk_control
                         merged.deferred += partial.deferred

@@ -115,6 +115,7 @@ device_info
 - 按 `max_concurrency` 有界调度；默认值为 `1`，CLI 可通过全局参数
   `--concurrency N` 覆盖。
 - 将可重试失败按类型退避，将风控错误升级为批次熔断；风控作为单个批次事件汇总一次，其余受影响任务保留待恢复。
+- 可选的风控自动恢复（`Settings.risk_poll_enabled`，默认关闭）：熔断后进入「等待 → 单探针 → 解除后按原并发继续」循环，等待期间不发请求，每个退避周期只发一个探针（对真实待下载曲目调一次受保护接口）；探针遇 AuthError 等不可等待错误会停止，超时或被用户停止时回落为熔断语义，任务保留待人工 resume。
 - 传播用户停止信号并保留未完成任务。
 
 `SqliteTaskStore` 保存任务状态、错误、字节进度和专辑元数据。`FileSink` 使用 `.part` 文件下载；服务器支持 Range 且校验一致时续传，完成后原子替换最终文件。
@@ -130,7 +131,7 @@ device_info
 | `SignError` | 本地载荷或上报失败 | 受限退避重试 |
 | `NetworkError` | 超时、连接失败 | 受限退避重试 |
 | `ApiError` | 平台响应或数据形态异常 | 按 `retryable` 决定 |
-| `RiskControlError` | 已识别的频控/验证码信号 | 熔断当前批次 |
+| `RiskControlError` | 已识别的频控/验证码信号 | 熔断当前批次；开启 `risk_poll` 时自动轮询等待解除后继续（默认关闭） |
 | `DecodeError` | 播放地址解码失败 | 记录失败 |
 | `StorageError` | 文件或 SQLite 失败 | 停止相关操作 |
 | `CancelledByUser` | 用户请求优雅停止 | 保存进度并返回 130 |
@@ -148,6 +149,8 @@ device_info
 `config.paths.xdl_home()` 是用户数据目录的单一来源，默认 `~/.xdl`，可由 `XDL_HOME` 覆盖。`Settings` 使用它生成 Profile、Cookie、任务库、设备信息和风控日志路径。
 
 命令行当前可覆盖下载目录、浏览器（`--browser auto|chrome|edge`，默认 auto 即 Chrome 优先、Edge 兜底）、音源后端、异步并发数，以及实验开关 `--experiment-rotate-device`。并发数必须大于 `0`；无效并发数、浏览器或后端值会快速报错，不会静默修正或退回。设备信息相关细项通过 Python `Settings` 配置。
+
+风控自动恢复默认关闭，可通过 `--risk-poll` / `--no-risk-poll` 或 WebUI 设置页「风控自动恢复」区开关；等待参数 `risk_poll_initial_wait`（首次等待，默认 30s）、`risk_poll_backoff_factor`（退避倍数，默认 2）、`risk_poll_max_wait`（单次等待上限，默认 900s）、`risk_poll_max_duration`（总等待上限，默认 3600s，0=不限）可根据本地 `xdl risk-report` 的 `recovery_seconds` 分布校准。
 
 `Settings.__post_init__` 按 `browser` 解析出实际浏览器（显式 `chrome_path` 优先，否则自动探测），并派生专用 Profile 默认目录（`{browser}-profile`）；WebUI 设置页切换浏览器时，仍为自动探测值的路径会跟随重新派生，自定义路径保持不变。
 

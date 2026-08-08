@@ -7,7 +7,7 @@ import pytest
 from xdl.application import Facade
 from xdl.domain import Track, PlayUrl
 from xdl.settings import Settings
-from xdl.errors import ConfigError
+from xdl.errors import ConfigError, RiskControlError
 
 
 class FakeSource:
@@ -42,6 +42,21 @@ class FakeSink:
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         with open(target_path, "wb") as f:
             f.write(b"x")
+
+
+class SequenceRiskSource(FakeSource):
+    """先抛 N 次风控，再恢复正常，并统计 get_track 调用次数。"""
+
+    def __init__(self, track=None, risk_times=1):
+        super().__init__(track=track)
+        self.risk_times = risk_times
+        self.calls = 0
+
+    async def get_track(self, track_id):
+        self.calls += 1
+        if self.calls <= self.risk_times:
+            raise RiskControlError("系统繁忙", ret=3005)
+        return await super().get_track(track_id)
 
 
 def test_login_does_not_construct_task_store(tmp_path):
@@ -133,3 +148,30 @@ def test_close_releases_created_task_store():
     app.close()
 
     assert store.closed == 1
+
+
+def test_track_risk_poll_wiring_from_settings(tmp_path):
+    source = SequenceRiskSource(risk_times=1)
+    settings = Settings(
+        download_dir=str(tmp_path),
+        risk_poll_enabled=True,
+        risk_poll_initial_wait=0,
+        risk_poll_max_duration=0,
+    )
+    app = Facade(source, FakeSink(), settings)
+
+    path = app.download_track("1", quality="standard")
+
+    assert path.endswith(".mp3")
+    # 1 次风控 + 1 次探针 + 1 次恢复后重跑
+    assert source.calls == 3
+
+
+def test_track_risk_poll_disabled_by_default(tmp_path):
+    source = SequenceRiskSource(risk_times=1)
+    app = Facade(source, FakeSink(), Settings(download_dir=str(tmp_path)))
+
+    with pytest.raises(RiskControlError):
+        app.download_track("1", quality="standard")
+
+    assert source.calls == 1

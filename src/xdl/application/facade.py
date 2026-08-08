@@ -16,7 +16,7 @@ from ..domain import Quality, parse_range, parse_track_id
 from ..errors import XdlError
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
-                       ResumeUseCase, RetryPolicy)
+                       ResumeUseCase, RetryPolicy, RiskRecoveryPolicy)
 
 
 class Facade:
@@ -39,6 +39,16 @@ class Facade:
                            backoff_base=s.retry_backoff_base,
                            cooldown=s.cooldown,
                            global_rounds=s.global_retry_rounds)
+
+    def _risk_recovery_policy(self) -> RiskRecoveryPolicy:
+        s = self._settings
+        return RiskRecoveryPolicy(
+            enabled=s.risk_poll_enabled,
+            initial_wait=s.risk_poll_initial_wait,
+            backoff_factor=s.risk_poll_backoff_factor,
+            max_wait=s.risk_poll_max_wait,
+            max_duration=s.risk_poll_max_duration,
+        )
 
     def login(self) -> str:
         """打开浏览器登录并保存会话，返回保存路径。"""
@@ -97,7 +107,8 @@ class Facade:
                                        self._settings.download_dir,
                                        retry=self._retry_policy(),
                                        store=self._optional_store(),
-                                       cancel_event=cancel)
+                                       cancel_event=cancel,
+                                       risk_recovery=self._risk_recovery_policy())
         await self._source.open()
         try:
             return await usecase.execute(target, q, reporter)
@@ -119,7 +130,8 @@ class Facade:
                                        retry=self._retry_policy(),
                                        store=store,
                                        stop_event=stop_event,
-                                       cancel_event=cancel_event)
+                                       cancel_event=cancel_event,
+                                       risk_recovery=self._risk_recovery_policy())
         # 全程复用一个 Chrome 会话（共享上下文里按需开 page 并发解析）
         try:
             await self._source.open()
@@ -147,7 +159,8 @@ class Facade:
                                 concurrency=self._settings.max_concurrency,
                                 retry=self._retry_policy(),
                                 stop_event=stop_event,
-                                cancel_event=cancel_event)
+                                cancel_event=cancel_event,
+                                risk_recovery=self._risk_recovery_policy())
         try:
             result = await usecase.execute(reporter)
             if stop_event.is_set():

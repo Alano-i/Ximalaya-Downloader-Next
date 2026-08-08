@@ -314,6 +314,20 @@
             </div>
           </section>
 
+          <section class="settings-section">
+            <div class="settings-intro">
+              <h2>风控自动恢复</h2>
+              <p>遇风控且任务未完成时，等待后自动探测并继续下载。默认关闭；等待期间不会反复请求。</p>
+            </div>
+            <div class="settings-fields field-grid">
+              <div class="toggle-grid wide">
+                <label class="switch-row"><input name="risk_poll_enabled" type="checkbox"><span>风控后自动轮询恢复（默认关闭）</span></label>
+              </div>
+              <label class="field-row"><span>首次等待（秒）</span><input name="risk_poll_initial_wait" type="number" min="0" step="0.5"></label>
+              <label class="field-row"><span>总等待上限（秒，0 不限）</span><input name="risk_poll_max_duration" type="number" min="0"></label>
+            </div>
+          </section>
+
           <details class="settings-details">
             <summary>路径与浏览器</summary>
             <div class="settings-fields details-fields">

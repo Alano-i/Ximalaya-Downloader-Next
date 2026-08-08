@@ -266,6 +266,25 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="[实验] 清 storage 后的重生轮数（默认 2）",
     )
+    parser.add_argument(
+        "--risk-poll",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="[实验] 风控后自动轮询等待解除并继续下载（默认关闭；"
+             "--risk-poll 开启，--no-risk-poll 显式关闭）",
+    )
+    parser.add_argument(
+        "--risk-poll-initial-wait",
+        type=float,
+        metavar="SEC",
+        help="[实验] 风控轮询首次等待秒数（默认 30；0=立即探测）",
+    )
+    parser.add_argument(
+        "--risk-poll-max-duration",
+        type=float,
+        metavar="SEC",
+        help="[实验] 风控轮询总等待上限秒数（默认 3600；0=不限）",
+    )
     sub = parser.add_subparsers(
         dest="command", required=True,
         metavar="{web,login,track,album,resume,gen-sign,risk-report}",
@@ -362,6 +381,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if getattr(args, "experiment_rebirth_rounds", None) is not None:
         settings.experiment_rebirth_rounds = int(args.experiment_rebirth_rounds)
+    if getattr(args, "risk_poll", None) is not None:
+        settings.risk_poll_enabled = bool(args.risk_poll)
+    if getattr(args, "risk_poll_initial_wait", None) is not None:
+        settings.risk_poll_initial_wait = float(args.risk_poll_initial_wait)
+    if getattr(args, "risk_poll_max_duration", None) is not None:
+        settings.risk_poll_max_duration = float(args.risk_poll_max_duration)
     handlers = {
         "web": _cmd_web,
         "login": _cmd_login,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -18,9 +19,13 @@ import requests
 
 try:
     from curl_cffi import requests as cffi_requests
+    from curl_cffi.curl import CurlError
+    from curl_cffi.requests.exceptions import RequestException as CffiRequestError
     _HAS_CURL_CFFI = True
 except ImportError:
     cffi_requests = None
+    CurlError = ()
+    CffiRequestError = ()
     _HAS_CURL_CFFI = False
 
 from ..config import platform
@@ -119,6 +124,11 @@ class PcHttpSource:
         self._cookie_max_age = cookie_max_age
         self._session_id = str(uuid.uuid4())
         self._request_index = 0
+        # 线程级连接复用：curl_cffi 的 Session 非线程安全，asyncio.to_thread
+        # 的并发 worker 各持一个 session，避免每集都新建 TLS 连接。
+        # 200+ 集后偶发 TLS 错误的诱因之一是连接/句柄反复重建，复用它可
+        # 显著减少握手次数；keep-alive 失效时 libcurl 会自动重连。
+        self._local = threading.local()
         # 运行态
         self._cookie_header: str = ""
         self._authenticated: bool | None = None
@@ -128,7 +138,21 @@ class PcHttpSource:
         await self._load_cookies()
 
     async def close(self) -> None:
-        pass
+        session = getattr(self._local, "session", None)
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+            self._local.session = None
+
+    def _get_session(self):
+        """返回当前线程的 curl_cffi Session（懒创建、复用）。"""
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = cffi_requests.Session(impersonate=self._impersonate)
+            self._local.session = session
+        return session
 
     async def _load_cookies(self) -> None:
         cached = (
@@ -165,17 +189,31 @@ class PcHttpSource:
                   "PC 端接口可能被拒或返回空数据。")
 
     def _http_get(self, url: str, params: dict, headers: dict):
-        if self._impersonate and _HAS_CURL_CFFI:
-            return cffi_requests.get(
+        """发 GET；curl_cffi 失败时兜底用标准 requests 重试一次。
+
+        curl_cffi 偶发 TLS 错误（curl 35）在长批量下载中已实际观测到，且其
+        异常不属于 XdlError，会绕过上层重试策略直接崩掉整个批次。这里统一
+        收敛为 NetworkError（retryable），并把瞬时 TLS 失败降级到 requests
+        再试一次，仍失败才交给重试策略。
+        """
+        try:
+            if self._impersonate and _HAS_CURL_CFFI:
+                try:
+                    return self._get_session().get(
+                        url, params=params, headers=headers,
+                        timeout=self._resolve_timeout,
+                    )
+                except (CurlError, CffiRequestError) as e:
+                    print(f"[warn] curl_cffi 请求失败，改用 requests 兜底: {e}")
+                    # 丢弃可能损坏的线程级 session，下个请求重建连接。
+                    self._local.session = None
+            headers.setdefault("User-Agent", platform.UA)
+            return requests.get(
                 url, params=params, headers=headers,
-                impersonate=self._impersonate,
                 timeout=self._resolve_timeout,
             )
-        headers.setdefault("User-Agent", platform.UA)
-        return requests.get(
-            url, params=params, headers=headers,
-            timeout=self._resolve_timeout,
-        )
+        except requests.RequestException as e:
+            raise NetworkError(f"解析请求失败: {e}") from e
 
     def _headers(self, referer: str, origin: str, *, with_sign: bool) -> dict:
         headers = {

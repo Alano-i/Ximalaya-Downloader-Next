@@ -8,10 +8,16 @@ import re
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from xdl.adapters.source_pc import PcHttpSource, _random_xm_sign
 from xdl.domain import Album, Track
-from xdl.errors import AuthError, RiskControlError
+from xdl.errors import AuthError, NetworkError, RiskControlError
+
+try:
+    from curl_cffi.curl import CurlError
+except ImportError:  # pragma: no cover
+    CurlError = RuntimeError
 
 
 class FakeResp:
@@ -204,3 +210,42 @@ def test_get_track_risk_control_raises(monkeypatch):
     })
     with pytest.raises(RiskControlError):
         src._get_track_sync("111")
+
+
+def test_http_get_falls_back_to_requests_on_curl_error(monkeypatch):
+    src = PcHttpSource(impersonate="chrome146")
+    src._cookies = []
+    src._cookie_header = ""
+
+    class FakeSession:
+        def get(self, *a, **kw):
+            raise CurlError("TLS connect error", 35)
+
+    def fake_requests_get(url, params, headers, timeout):
+        return FakeResp({"ret": 200})
+
+    monkeypatch.setattr(src, "_get_session", lambda: FakeSession())
+    monkeypatch.setattr("xdl.adapters.source_pc.requests.get",
+                        fake_requests_get)
+    resp = src._http_get("https://pc.ximalaya.com/x", {}, {})
+    assert resp.json() == {"ret": 200}
+
+
+def test_http_get_raises_network_error_when_both_fail(monkeypatch):
+    src = PcHttpSource(impersonate="chrome146")
+    src._cookies = []
+    src._cookie_header = ""
+
+    class FakeSession:
+        def get(self, *a, **kw):
+            raise CurlError("TLS connect error", 35)
+
+    def fake_requests_get(url, params, headers, timeout):
+        raise requests.RequestException("boom")
+
+    monkeypatch.setattr(src, "_get_session", lambda: FakeSession())
+    monkeypatch.setattr("xdl.adapters.source_pc.requests.get",
+                        fake_requests_get)
+    with pytest.raises(NetworkError) as exc:
+        src._http_get("https://pc.ximalaya.com/x", {}, {})
+    assert exc.value.retryable is True

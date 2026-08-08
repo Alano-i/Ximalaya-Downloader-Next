@@ -147,6 +147,17 @@ xdl --source-backend chrome track <链接或ID>
 
 该路径主要用于登录与兼容诊断，接管哪个浏览器跟随 `--browser` 设置。只有在默认 HTTP 后端暂时不兼容且你理解其限制时才使用它。
 
+## PC 桌面端后端
+
+面向桌面客户端场景的轻量后端，纯 HTTP，无需浏览器参与：
+
+```bash
+xdl --source-backend pc track <链接或ID>
+xdl --source-backend pc album <链接或ID>
+```
+
+登录方式与默认后端一致：先 `xdl login` 保存会话，之后直接下载即可。日常批量下载时解析更稳定，WebUI 也可在设置页「音源后端」中切换。
+
 ## 本地数据
 
 默认用户数据位于 `~/.xdl`：

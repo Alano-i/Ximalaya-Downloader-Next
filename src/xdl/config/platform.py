@@ -19,6 +19,20 @@ ALBUM_URL = BASE + "/album/{album_id}"
 TRACKS_LIST_URL = BASE + "/revision/album/getTracksList"
 TRACKS_PAGE_SIZE = 30   # 接口固定每页 30 条（传 pageSize 无效）
 
+# ---- PC 桌面端接口 ----
+# - play/v1/show：曲目列表，num 为 1 基页码，hasMore 控制翻页。
+# - play/v1/audio：播放权限校验，返回 canPlay/isPaid/hasBuy。
+# - track/quality：音质与播放地址（aod.cos.tx.xmcdn.com）。
+PC_BASE = "https://pc.ximalaya.com"
+PC_PLAY_SHOW_URL = PC_BASE + "/simple-revision-for-pc/play/v1/show"
+PC_PLAY_AUDIO_URL = PC_BASE + "/simple-revision-for-pc/play/v1/audio"
+PC_PLAY_PAGE_SIZE = 30
+
+MOBILE_BASE = "https://mobile.ximalaya.com"
+TRACK_QUALITY_URL = (
+    MOBILE_BASE + "/mobile-playpage/playpage/track/quality/{track_id}/{ts}"
+)
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
 

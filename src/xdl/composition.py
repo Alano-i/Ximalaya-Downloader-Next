@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .settings import Settings
 from .adapters import (Www2Decoder, FileSink, ChromeSource, HttpSource,
-                       PySignProvider, SqliteTaskStore)
+                       PcHttpSource, PySignProvider, SqliteTaskStore)
 from .application import Facade
 from .errors import ConfigError
 from .risk import RiskEventRecorder
@@ -76,6 +76,32 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             device_info_path=settings.device_info_path,
             browser=browser,
         )
+    if backend == "pc":
+        # PC 桌面端接口：play/v1/show（列表）+ track/quality（播放地址），
+        # 解析链路更简单，无需 SignProvider/Decoder。登录仍走 ChromeSource 兜底。
+        chrome_fallback = ChromeSource(
+            decoder,
+            chrome_path=settings.chrome_path,
+            profile_dir=settings.chrome_profile_dir,
+            port=settings.cdp_port,
+            resolve_timeout=settings.resolve_timeout,
+            headless=settings.chrome_headless,
+            risk_recorder=risk_recorder,
+            risk_fallback_headful=settings.risk_fallback_headful,
+            reset_device_fingerprint=settings.reset_device_fingerprint,
+            browser=browser,
+        )
+        return PcHttpSource(
+            chrome_path=settings.chrome_path,
+            profile_dir=settings.chrome_profile_dir,
+            cookies_cache_path=settings.cookies_cache_path,
+            resolve_timeout=settings.resolve_timeout,
+            chrome_headless=settings.chrome_headless,
+            risk_recorder=risk_recorder,
+            chrome_fallback=chrome_fallback,
+            impersonate=settings.source_impersonate,
+            browser=browser,
+        )
     if backend == "chrome":
         # 兼容路径：CDP 接管真实浏览器（Chrome 或 Edge，跟随 browser 设置）。
         # 实测仍可能触发自动化环境风控，因此不再作为默认下载路径。
@@ -92,5 +118,6 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             browser=browser,
         )
     raise ConfigError(
-        f"未知音源后端 {settings.source_backend!r}；可选值为 'http' 或 'chrome'。"
+        f"未知音源后端 {settings.source_backend!r}；"
+        "可选值为 'http'、'pc' 或 'chrome'。"
     )

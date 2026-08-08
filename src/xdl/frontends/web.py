@@ -59,7 +59,7 @@ class SettingsUpdate(StrictModel):
     download_dir: str | None = None
     default_quality: Literal["high", "standard", "low"] | None = None
     browser: Literal["auto", "chrome", "edge"] | None = None
-    source_backend: Literal["http", "chrome"] | None = None
+    source_backend: Literal["http", "pc", "chrome"] | None = None
     max_concurrency: int | None = Field(default=None, ge=1, le=16)
     resolve_timeout: int | None = Field(default=None, ge=1, le=300)
     http_timeout: int | None = Field(default=None, ge=1, le=1800)

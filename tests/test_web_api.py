@@ -151,3 +151,21 @@ def test_web_api_updates_settings_and_opens_task_directory():
     assert settings.json()["settings"]["experiment_risk_cooldown_seconds"] == 12.5
     assert settings.json()["settings"]["experiment_rotate_headless"] is True
     assert opened.json()["task_id"] == 9
+
+
+def test_web_api_accepts_pc_source_backend():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.put("/api/settings", json={"source_backend": "pc"})
+
+    assert response.status_code == 200
+    assert response.json()["settings"]["source_backend"] == "pc"
+
+
+def test_web_api_rejects_unknown_source_backend():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.put("/api/settings",
+                              json={"source_backend": "weird"})
+
+    assert response.status_code == 422

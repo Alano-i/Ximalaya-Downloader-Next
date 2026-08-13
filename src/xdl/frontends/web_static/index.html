@@ -141,11 +141,34 @@
               失败 <span id="count-failed">0</span>
             </button>
           </div>
-          <label class="task-search">
-            <span class="sr-only">搜索任务</span>
-            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-            <input id="task-search" type="search" maxlength="200" placeholder="搜索曲目或 ID">
-          </label>
+          <div class="toolbar-right">
+            <span class="scope-chip is-hidden" id="album-chip">
+              <span id="album-chip-text"></span>
+              <button type="button" data-action="clear-album" aria-label="清除专辑范围">×</button>
+            </span>
+            <button class="select-all-link" id="select-all" type="button"
+                    data-action="select-all"></button>
+            <label class="task-search">
+              <span class="sr-only">搜索任务</span>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+              <input id="task-search" type="search" maxlength="200" placeholder="搜索曲目或 ID">
+            </label>
+          </div>
+        </div>
+
+        <div class="bulk-bar is-hidden" id="bulk-bar" role="region" aria-label="批量操作">
+          <span class="bulk-count">已选 <b id="bulk-count">0</b> 条</span>
+          <span class="bulk-note is-hidden" id="bulk-note"></span>
+          <span class="bulk-spacer"></span>
+          <button class="button secondary" type="button" data-action="requeue-picked">
+            加入恢复队列
+          </button>
+          <button class="button danger" type="button" data-action="delete-picked">
+            删除
+          </button>
+          <button class="button ghost" type="button" data-action="clear-pick">
+            取消选择
+          </button>
         </div>
 
         <div class="inline-alert is-hidden" id="task-error" role="alert"></div>
@@ -154,6 +177,10 @@
           <table class="task-table">
             <thead>
               <tr>
+                <th class="select-cell">
+                  <input class="cbx" type="checkbox" id="head-check"
+                         title="全选本页" aria-label="全选本页">
+                </th>
                 <th>曲目</th>
                 <th>状态</th>
                 <th>音质</th>
@@ -411,6 +438,7 @@
   </dialog>
 
   <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <div id="dialog-root"></div>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

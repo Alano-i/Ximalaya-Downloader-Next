@@ -55,6 +55,12 @@ class OpenDownloadsRequest(StrictModel):
     task_id: int | None = None
 
 
+class TaskSelectionRequest(StrictModel):
+    """一批任务 id。用 POST 而不是带 body 的 DELETE：后者在部分中间件上行为不可靠。"""
+
+    ids: list[int] = Field(min_length=1, max_length=5000)
+
+
 class SettingsUpdate(StrictModel):
     download_dir: str | None = None
     default_quality: Literal["high", "standard", "low"] | None = None
@@ -155,12 +161,31 @@ def create_app(runtime: WebRuntime | None = None) -> FastAPI:
     @app.get("/api/tasks")
     def tasks(state: Literal["pending", "downloading", "done", "failed"] | None = None,
               search: str = Query(default="", max_length=200),
+              album_id: str = Query(default="", max_length=64),
               limit: int = Query(default=100, ge=1, le=200),
               offset: int = Query(default=0, ge=0)):
         return service.tasks_snapshot(
-            state=state, search=search,
+            state=state, search=search, album_id=album_id,
             limit=limit, offset=offset,
         )
+
+    @app.get("/api/tasks/ids")
+    def task_ids(state: Literal["pending", "downloading", "done", "failed"] | None = None,
+                 search: str = Query(default="", max_length=200),
+                 album_id: str = Query(default="", max_length=64)):
+        return service.task_ids(state=state, search=search, album_id=album_id)
+
+    @app.post("/api/tasks/preview")
+    def preview_tasks(body: TaskSelectionRequest):
+        return service.preview_tasks(body.ids)
+
+    @app.post("/api/tasks/delete")
+    def delete_tasks(body: TaskSelectionRequest):
+        return service.delete_tasks(body.ids)
+
+    @app.post("/api/tasks/requeue")
+    def requeue_tasks(body: TaskSelectionRequest):
+        return service.requeue_tasks(body.ids)
 
     @app.get("/api/risk-report")
     def risk_report():

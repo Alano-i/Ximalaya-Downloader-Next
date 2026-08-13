@@ -12,7 +12,11 @@ from datetime import datetime, timezone
 
 from ..domain import DownloadTask, TaskState
 from ..errors import StorageError
-from ..ports import TaskQueryResult
+from ..ports import (TaskDeleteResult, TaskQueryResult,
+                     TaskSelectionSummary)
+
+# 与 adapters/sink_file.py 的 _META_SUFFIX 一致：断点续传的元数据挨着 .part 放。
+_PART_META_SUFFIX = ".meta"
 
 try:  # pragma: no cover - exercised on Unix/macOS in tests via monkeypatch.
     import fcntl
@@ -27,6 +31,33 @@ except ImportError:  # pragma: no cover
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _chunks(items: list, size: int):
+    """按块切分，避开 SQLite 对单条语句变量个数的上限。"""
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def _remove_part_files(part_paths: list[str]) -> tuple[int, int]:
+    """删除 ``.part`` 及其 ``.part.meta``，返回 (删掉的文件数, 失败数)。
+
+    已经不存在的文件不算失败——删除的目标状态是"它不在了"，本来就不在也算达成。
+    真正的失败是权限或占用，这时只计数，让调用方如实回报。
+    """
+    removed = 0
+    failed = 0
+    for part_path in part_paths:
+        for path in (part_path, part_path + _PART_META_SUFFIX):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                failed += 1
+            else:
+                removed += 1
+    return removed, failed
 
 
 def _wrap_sqlite_errors(fn):
@@ -367,24 +398,24 @@ class SqliteTaskStore:
             ).fetchall()
         return [self._row_to_task(r) for r in rows]
 
-    @_wrap_sqlite_errors
-    def query_tasks(self, *, state: TaskState | None = None,
-                    search: str = "", limit: int = 100,
-                    offset: int = 0) -> TaskQueryResult:
-        """返回一个有界任务页，并同时给出全局状态计数。
+    @staticmethod
+    def _scope_clause(state: TaskState | None, search: str,
+                      album_id: str) -> tuple[str, list[object]]:
+        """把「状态 + 搜索词 + 专辑」三个筛选维度编译成一段 WHERE。
 
-        WebUI 高频刷新只跨这个查询 seam；即使任务库持续增长，传输和渲染成本
-        也受 ``limit`` 约束。offset 超出尾页时自动回到最后一页，避免任务状态
-        变化后把用户留在一个凭空出现的空页。
+        三者正交且都可省略。``album_id`` 走**精确**相等而不是 LIKE：它用来圈定
+        删除范围，模糊匹配会让「专辑 1234」连带命中 12345，酿成跨专辑误删。
+        ``search`` 仍是模糊的——它只是找东西，不决定破坏性操作的边界。
         """
-        limit = max(1, min(200, int(limit)))
-        offset = max(0, int(offset))
-        search = search.strip()
         where: list[str] = []
         params: list[object] = []
         if state is not None:
             where.append("state=?")
             params.append(state.value)
+        if album_id:
+            where.append("album_id=?")
+            params.append(album_id)
+        search = (search or "").strip()
         if search:
             escaped = (search.replace("\\", "\\\\")
                        .replace("%", "\\%")
@@ -395,7 +426,21 @@ class SqliteTaskStore:
                 "OR album_id LIKE ? ESCAPE '\\')"
             )
             params.extend((pattern, pattern, pattern))
-        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        return (f" WHERE {' AND '.join(where)}" if where else ""), params
+
+    @_wrap_sqlite_errors
+    def query_tasks(self, *, state: TaskState | None = None,
+                    search: str = "", album_id: str = "",
+                    limit: int = 100, offset: int = 0) -> TaskQueryResult:
+        """返回一个有界任务页，并同时给出全局状态计数。
+
+        WebUI 高频刷新只跨这个查询 seam；即使任务库持续增长，传输和渲染成本
+        也受 ``limit`` 约束。offset 超出尾页时自动回到最后一页，避免任务状态
+        变化后把用户留在一个凭空出现的空页。
+        """
+        limit = max(1, min(200, int(limit)))
+        offset = max(0, int(offset))
+        clause, params = self._scope_clause(state, search, album_id)
 
         with self._lock:
             count_rows = self._conn.execute(
@@ -425,6 +470,152 @@ class SqliteTaskStore:
             counts=counts,
             offset=offset,
             limit=limit,
+        )
+
+    @_wrap_sqlite_errors
+    def query_task_ids(self, *, state: TaskState | None = None,
+                       search: str = "", album_id: str = "",
+                       cap: int = 5000) -> list[int]:
+        """返回当前筛选命中的全部任务 id，供前端做「选中全部」的快照。
+
+        前端拿到的是**那一刻**的 id 列表而不是筛选条件，删除时只删这些 id。
+        这样即使删除前后台又下完了几集，新产生的任务也不会被误伤——确认框上
+        的数字始终等于实际删除的上限。
+        """
+        cap = max(1, min(20000, int(cap)))
+        clause, params = self._scope_clause(state, search, album_id)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id FROM download_task{clause} ORDER BY id DESC LIMIT ?",
+                (*params, cap),
+            ).fetchall()
+        return [int(r["id"]) for r in rows]
+
+    @_wrap_sqlite_errors
+    def summarize_tasks(self, ids: list[int]) -> TaskSelectionSummary:
+        """按真实 id 集统计删除后果，供确认框列明细。
+
+        ``part_bytes`` 只累计未完成任务已下的字节：那才是删了会真正丢失、需要
+        从头再下的东西。已完成任务的成品不在统计里，因为它根本不会被删。
+        """
+        wanted = [int(i) for i in dict.fromkeys(ids or [])]
+        if not wanted:
+            return TaskSelectionSummary()
+
+        states: dict[str, int] = {}
+        running = 0
+        with_part = 0
+        part_bytes = 0
+        found = 0
+        with self._lock:
+            for chunk in _chunks(wanted, 400):
+                marks = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT state, part_path, bytes_done FROM download_task "
+                    f"WHERE id IN ({marks})",
+                    chunk,
+                ).fetchall()
+                found += len(rows)
+                for row in rows:
+                    state = str(row["state"])
+                    if state == TaskState.DOWNLOADING.value:
+                        running += 1
+                        continue
+                    states[state] = states.get(state, 0) + 1
+                    if row["part_path"] and int(row["bytes_done"] or 0) > 0:
+                        with_part += 1
+                        part_bytes += int(row["bytes_done"] or 0)
+        return TaskSelectionSummary(
+            states=states, running=running, with_part=with_part,
+            part_bytes=part_bytes, missing=len(wanted) - found,
+        )
+
+    @_wrap_sqlite_errors
+    def delete_tasks(self, ids: list[int]) -> TaskDeleteResult:
+        """删除指定任务，并清理它们的 ``.part`` 半成品。
+
+        三条不变量：
+
+        1. **成品音频永不删除。** 只动 ``part_path``，``target_path`` 一律不碰。
+        2. **运行中的任务删不掉。** DELETE 带 ``state != 'downloading'`` 守卫，
+           在 SQL 层挡住与下载线程的竞态；被挡下的计入 ``skipped_running``。
+        3. **文件删除失败不回滚。** 数据库是"任务是否存在"的真相，磁盘上残留
+           一个 ``.part`` 不影响正确性，只记数不抛错。
+        """
+        wanted = [int(i) for i in dict.fromkeys(ids or [])]
+        if not wanted:
+            return TaskDeleteResult()
+
+        found = 0
+        deleted = 0
+        part_paths: list[str] = []
+        with self._lock, self._conn:
+            for chunk in _chunks(wanted, 400):
+                marks = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT id, state, part_path FROM download_task "
+                    f"WHERE id IN ({marks})",
+                    chunk,
+                ).fetchall()
+                found += len(rows)
+                cur = self._conn.execute(
+                    f"DELETE FROM download_task WHERE id IN ({marks}) "
+                    "AND state != ?",
+                    (*chunk, TaskState.DOWNLOADING.value),
+                )
+                deleted += int(cur.rowcount)
+                for row in rows:
+                    if (str(row["state"]) != TaskState.DOWNLOADING.value
+                            and row["part_path"]):
+                        part_paths.append(str(row["part_path"]))
+            self._prune_orphan_albums_locked()
+
+        removed, failed = _remove_part_files(part_paths)
+        return TaskDeleteResult(
+            deleted=deleted,
+            skipped_running=found - deleted,
+            missing=len(wanted) - found,
+            files_removed=removed,
+            files_failed=failed,
+        )
+
+    @_wrap_sqlite_errors
+    def requeue_tasks(self, ids: list[int]) -> int:
+        """把指定的失败任务放回待恢复队列，返回实际改动条数。
+
+        只对 ``failed`` 生效：``pending`` 本来就在队列里，``done`` 重排也会被
+        「文件已存在」跳过，``downloading`` 正在跑。不自动开跑下载——本项目的
+        恢复粒度是全库而非任务 id，自动触发会远超用户预期。
+        """
+        wanted = [int(i) for i in dict.fromkeys(ids or [])]
+        if not wanted:
+            return 0
+        changed = 0
+        with self._lock, self._conn:
+            for chunk in _chunks(wanted, 400):
+                marks = ",".join("?" * len(chunk))
+                cur = self._conn.execute(
+                    f"""
+                    UPDATE download_task
+                    SET state=?, retryable=0, last_error_code='',
+                        last_error_msg='', updated_at=?
+                    WHERE id IN ({marks}) AND state=?
+                    """,
+                    (TaskState.PENDING.value, _now(), *chunk,
+                     TaskState.FAILED.value),
+                )
+                changed += int(cur.rowcount)
+        return changed
+
+    def _prune_orphan_albums_locked(self) -> None:
+        """清掉不再有任务指向的 album_sync 行。
+
+        它只存 title / cursor / total_known 这类元数据，留着不会出错，但会让
+        「恢复全部」的专辑列表和进度宽度参考到已经不存在的专辑。
+        """
+        self._conn.execute(
+            "DELETE FROM album_sync WHERE album_id NOT IN "
+            "(SELECT DISTINCT album_id FROM download_task)"
         )
 
     @_wrap_sqlite_errors

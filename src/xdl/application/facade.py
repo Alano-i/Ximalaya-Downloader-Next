@@ -14,7 +14,8 @@ from collections.abc import Callable
 
 from ..domain import Quality, TaskState, parse_range, parse_track_id
 from ..errors import XdlError
-from ..ports import TaskQueryResult
+from ..ports import (TaskDeleteResult, TaskQueryResult,
+                     TaskSelectionSummary)
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
                        ResumeUseCase, RetryPolicy, RiskRecoveryPolicy)
@@ -81,8 +82,8 @@ class Facade:
         return store.all_tasks() if store is not None else []
 
     def query_tasks(self, *, state: TaskState | None = None,
-                    search: str = "", limit: int = 100,
-                    offset: int = 0) -> TaskQueryResult:
+                    search: str = "", album_id: str = "",
+                    limit: int = 100, offset: int = 0) -> TaskQueryResult:
         """只读：查询有界任务页；无任务库时返回稳定的空页。"""
         store = self._task_store()
         if store is None:
@@ -92,8 +93,41 @@ class Facade:
                 offset=0, limit=limit,
             )
         return store.query_tasks(
-            state=state, search=search, limit=limit, offset=offset,
+            state=state, search=search, album_id=album_id,
+            limit=limit, offset=offset,
         )
+
+    def query_task_ids(self, *, state: TaskState | None = None,
+                       search: str = "", album_id: str = "",
+                       cap: int = 5000) -> list[int]:
+        """只读：当前筛选命中的全部任务 id，供前端「选中全部」取快照。"""
+        store = self._task_store()
+        if store is None:
+            return []
+        return store.query_task_ids(
+            state=state, search=search, album_id=album_id, cap=cap,
+        )
+
+    def summarize_tasks(self, ids: list[int]) -> TaskSelectionSummary:
+        """只读：一批任务 id 的删除后果预览。"""
+        store = self._task_store()
+        if store is None:
+            return TaskSelectionSummary()
+        return store.summarize_tasks(ids)
+
+    def delete_tasks(self, ids: list[int]) -> TaskDeleteResult:
+        """删除任务记录并清理其 .part 半成品；成品音频不受影响。"""
+        store = self._task_store()
+        if store is None:
+            return TaskDeleteResult()
+        return store.delete_tasks(ids)
+
+    def requeue_tasks(self, ids: list[int]) -> int:
+        """把选中的失败任务放回待恢复队列，返回实际改动条数。"""
+        store = self._task_store()
+        if store is None:
+            return 0
+        return store.requeue_tasks(ids)
 
     def close(self) -> None:
         """释放惰性创建的任务库，供常驻前端重载配置或关闭进程。"""

@@ -45,6 +45,25 @@ class FakeRuntime:
             },
         }
 
+    def task_ids(self, **kwargs):
+        self.calls.append(("task_ids", kwargs))
+        return {"ids": [1, 2], "count": 2, "truncated": False}
+
+    def preview_tasks(self, ids):
+        self.calls.append(("preview", ids))
+        return {"summary": {"states": {"done": len(ids)}, "running": 0,
+                            "with_part": 0, "part_bytes": 0, "missing": 0}}
+
+    def delete_tasks(self, ids):
+        self.calls.append(("delete", ids))
+        return {"result": {"deleted": len(ids)}, "tasks": [],
+                "counts": {"all": 0}, "page": {}}
+
+    def requeue_tasks(self, ids):
+        self.calls.append(("requeue", ids))
+        return {"requeued": len(ids), "tasks": [], "counts": {"all": 0},
+                "page": {}}
+
     def risk_report(self):
         return {"path": "risk.jsonl", "summary": {"total": 0}}
 
@@ -150,7 +169,8 @@ def test_web_api_forwards_bounded_task_query_and_light_operation_snapshot():
 
     assert tasks.status_code == 200
     assert ("tasks", {
-        "state": "done", "search": "needle", "limit": 50, "offset": 100,
+        "state": "done", "search": "needle", "album_id": "",
+        "limit": 50, "offset": 100,
     }) in runtime.calls
     assert operation.status_code == 200
     assert detailed.status_code == 200
@@ -215,3 +235,36 @@ def test_web_api_rejects_unknown_source_backend():
                               json={"source_backend": "weird"})
 
     assert response.status_code == 422
+
+
+def test_task_routes_pass_scope_and_selection_through():
+    runtime = FakeRuntime()
+    client = TestClient(create_app(runtime))
+
+    client.get("/api/tasks?state=done&album_id=1234&search=abc")
+    client.get("/api/tasks/ids?state=failed&album_id=1234")
+    preview = client.post("/api/tasks/preview", json={"ids": [1, 2]})
+    deleted = client.post("/api/tasks/delete", json={"ids": [1, 2, 3]})
+    requeued = client.post("/api/tasks/requeue", json={"ids": [7]})
+
+    scope = dict(runtime.calls[0][1])
+    assert scope["state"] == "done"
+    assert scope["album_id"] == "1234"
+    assert ("task_ids", {"state": "failed", "search": "", "album_id": "1234"}) \
+        in runtime.calls
+    assert preview.json()["summary"]["states"] == {"done": 2}
+    assert deleted.json()["result"]["deleted"] == 3
+    assert requeued.json()["requeued"] == 1
+
+
+def test_task_selection_routes_validate_payload():
+    client = TestClient(create_app(FakeRuntime()))
+
+    assert client.post("/api/tasks/delete", json={"ids": []}).status_code == 422
+    assert client.post("/api/tasks/delete", json={}).status_code == 422
+    # 超上限直接拒绝，不悄悄截断
+    huge = {"ids": list(range(5001))}
+    assert client.post("/api/tasks/delete", json=huge).status_code == 422
+    # 不认识的字段一律拒绝（StrictModel）
+    bad = {"ids": [1], "force": True}
+    assert client.post("/api/tasks/delete", json=bad).status_code == 422

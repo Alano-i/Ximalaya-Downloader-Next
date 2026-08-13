@@ -30,8 +30,22 @@ from .web_config import (load_web_settings, save_web_settings,
                          settings_dict)
 
 
+# 单次删除/恢复请求接受的最大 id 数。够覆盖任何真实任务库，又能挡住畸形请求。
+_MAX_SELECTION = 5000
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _clean_ids(ids) -> list[int]:
+    """去重并校验 id 列表；超过上限直接拒绝而不是悄悄截断。"""
+    cleaned = list(dict.fromkeys(int(i) for i in (ids or [])))
+    if len(cleaned) > _MAX_SELECTION:
+        raise ValueError(
+            f"一次最多操作 {_MAX_SELECTION} 条任务，本次收到 {len(cleaned)} 条。"
+        )
+    return cleaned
 
 
 def _rederive_browser_paths(values: dict, old_settings: Settings) -> None:
@@ -130,12 +144,12 @@ class WebRuntime:
         return snapshot
 
     def tasks_snapshot(self, *, state: str | None = None,
-                       search: str = "", limit: int = 100,
-                       offset: int = 0) -> dict:
+                       search: str = "", album_id: str = "",
+                       limit: int = 100, offset: int = 0) -> dict:
         try:
             task_state = TaskState(state) if state else None
             result = self._facade.query_tasks(
-                state=task_state, search=search,
+                state=task_state, search=search, album_id=album_id,
                 limit=limit, offset=offset,
             )
             tasks = [_task_dict(task) for task in result.tasks]
@@ -167,6 +181,35 @@ class WebRuntime:
                 },
                 "error": str(exc),
             }
+
+    def task_ids(self, *, state: str | None = None, search: str = "",
+                 album_id: str = "", cap: int = _MAX_SELECTION) -> dict:
+        """「选中全部」用的 id 快照。
+
+        返回 truncated 而不是静默截断：前端得知道自己拿到的是不是完整集合，
+        否则确认框上的数字会撒谎。
+        """
+        task_state = TaskState(state) if state else None
+        ids = self._facade.query_task_ids(
+            state=task_state, search=search, album_id=album_id, cap=cap,
+        )
+        return {"ids": ids, "count": len(ids), "truncated": len(ids) >= cap}
+
+    def preview_tasks(self, ids: list[int]) -> dict:
+        """删除前的后果预览。由后端按真实 id 集统计，跨页选择也不会撒谎。"""
+        return {"summary": asdict(self._facade.summarize_tasks(_clean_ids(ids)))}
+
+    def delete_tasks(self, ids: list[int]) -> dict:
+        """删除任务并清理 .part；不占用操作锁，下载进行中也能用。"""
+        ids = _clean_ids(ids)
+        result = self._facade.delete_tasks(ids)
+        return {"result": asdict(result), **self.tasks_snapshot()}
+
+    def requeue_tasks(self, ids: list[int]) -> dict:
+        """把选中的失败任务放回待恢复队列（不自动开跑下载）。"""
+        ids = _clean_ids(ids)
+        return {"requeued": self._facade.requeue_tasks(ids),
+                **self.tasks_snapshot()}
 
     def risk_report(self) -> dict:
         return {

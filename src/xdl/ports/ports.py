@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from ..domain import Track, Album, DownloadTask, TaskState
@@ -20,6 +20,37 @@ class TaskQueryResult:
     counts: dict[TaskState, int]
     offset: int
     limit: int
+
+
+@dataclass(frozen=True)
+class TaskSelectionSummary:
+    """一批任务 id 的后果预览，供删除确认框如实列明细。
+
+    必须由存储层按真实 id 集计算：选中集可以跨页，前端手里只有当前页那 100
+    条，自己统计出来的分布会漏掉绝大部分，让确认框上的数字撒谎。
+    """
+
+    states: dict[str, int] = field(default_factory=dict)
+    running: int = 0
+    with_part: int = 0
+    part_bytes: int = 0
+    missing: int = 0
+
+
+@dataclass(frozen=True)
+class TaskDeleteResult:
+    """删除任务的结果明细，供前端如实回报而不是只说"成功"。
+
+    ``skipped_running`` 是被 ``state='downloading'`` 守卫挡下的条数：运行中的
+    任务不能删，否则下载线程会继续写一个没有记录指向的文件。
+    ``missing`` 是请求里已经不存在的 id（别处先删了），静默计数不算错误。
+    """
+
+    deleted: int = 0
+    skipped_running: int = 0
+    missing: int = 0
+    files_removed: int = 0
+    files_failed: int = 0
 
 
 @runtime_checkable
@@ -82,7 +113,14 @@ class TaskStore(Protocol):
     def pending_albums(self) -> list[tuple[str, str, int]]: ...
     def pending_tasks(self, album_id: str) -> list[DownloadTask]: ...
     def query_tasks(self, *, state: TaskState | None = None, search: str = "",
-                    limit: int = 100, offset: int = 0) -> TaskQueryResult: ...
+                    album_id: str = "", limit: int = 100,
+                    offset: int = 0) -> TaskQueryResult: ...
+    def query_task_ids(self, *, state: TaskState | None = None,
+                       search: str = "", album_id: str = "",
+                       cap: int = 5000) -> list[int]: ...
+    def summarize_tasks(self, ids: list[int]) -> TaskSelectionSummary: ...
+    def delete_tasks(self, ids: list[int]) -> TaskDeleteResult: ...
+    def requeue_tasks(self, ids: list[int]) -> int: ...
     def all_tasks(self) -> list[DownloadTask]: ...
     def save_album_meta(self, album_id: str, title: str, total: int) -> None: ...
     def save_album_cursor(self, album_id: str, cursor: str) -> None: ...

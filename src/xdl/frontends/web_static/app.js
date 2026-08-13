@@ -6,6 +6,11 @@ const state = {
   mode: "album",
   filter: "all",
   search: "",
+  album: "",
+  albumTitle: "",
+  // 选中集是「那一刻的 id 快照」而不是筛选条件：删除期间后台新下完的任务
+  // 不会被误伤，确认框上的数字也就永远算数。
+  picked: new Set(),
   settings: null,
   login: null,
   tasks: [],
@@ -186,6 +191,55 @@ function applyTaskPayload(payload, { force = false } = {}) {
   }
 }
 
+function renderSelection() {
+  const page = state.tasks.filter((task) => task.state !== "downloading");
+  const on = page.filter((task) => state.picked.has(task.id)).length;
+  const head = $("#head-check");
+  head.checked = page.length > 0 && on === page.length;
+  head.indeterminate = on > 0 && on < page.length;
+  head.disabled = page.length === 0;
+
+  const chip = $("#album-chip");
+  chip.classList.toggle("is-hidden", !state.album);
+  if (state.album) {
+    $("#album-chip-text").textContent =
+      `专辑：${state.albumTitle || state.album}`;
+  }
+
+  const total = Number(state.page.total || 0);
+  const selectAll = $("#select-all");
+  selectAll.textContent = `选中全部 ${total} 条${scopeWord()}`;
+  selectAll.disabled = total === 0;
+
+  const count = state.picked.size;
+  $("#bulk-bar").classList.toggle("is-hidden", count === 0);
+  if (count > 0) {
+    $("#bulk-count").textContent = count;
+    const locked = state.tasks.filter((task) => task.state === "downloading").length;
+    const note = $("#bulk-note");
+    note.classList.toggle("is-hidden", locked === 0);
+    note.textContent = locked ? `· ${locked} 条运行中无法选择` : "";
+  }
+}
+
+function scopeWord() {
+  const bits = [];
+  const labels = { downloading: "进行中", pending: "待恢复", done: "已完成", failed: "失败" };
+  if (state.filter !== "all") bits.push(labels[state.filter] || state.filter);
+  if (state.album) bits.push(`《${state.albumTitle || state.album}》`);
+  if (state.search.trim()) bits.push(`含“${state.search.trim()}”`);
+  return bits.length ? ` ${bits.join(" · ")}` : "";
+}
+
+/* 范围变了选中必须失效，否则会出现「要删的东西一条都不在屏幕上」。
+   翻页不算范围变化——用户得能翻页核对再删。 */
+function resetScope(changes) {
+  Object.assign(state, changes);
+  state.page.offset = 0;
+  state.picked.clear();
+  loadTaskPage();
+}
+
 function renderTasks() {
   renderCounts();
   const list = $("#task-list");
@@ -204,6 +258,7 @@ function renderTasks() {
   }
   renderTaskError();
   renderPagination();
+  renderSelection();
 }
 
 function renderTaskError() {
@@ -239,16 +294,29 @@ function taskRow(task) {
     failed: "失败",
   };
   const episode = task.album_index > 0 ? `第 ${String(task.album_index).padStart(2, "0")} 集` : "单曲";
-  const parent = task.album_id ? `专辑 ${task.album_id}` : "独立曲目";
   const error = task.last_error_msg
     ? `<span class="task-error-copy" title="${escapeHtml(task.last_error_msg)}">${escapeHtml(task.last_error_msg)}</span>`
     : "";
+  // 运行中的任务不能删：下载线程正握着它的 .part，删了记录它也会继续写完
+  const locked = task.state === "downloading";
+  const lockHint = "任务运行中，请先优雅停止";
+  const picked = state.picked.has(task.id);
+  const parent = task.album_id
+    ? `<button class="album-link" type="button" data-album-id="${escapeHtml(task.album_id)}"
+        title="只看这个专辑">专辑 ${escapeHtml(task.album_id)}</button>`
+    : "独立曲目";
   return `
-    <tr data-task-id="${task.id ?? ""}">
+    <tr data-task-id="${task.id ?? ""}" class="${picked ? "is-picked" : ""}${locked ? " is-locked" : ""}">
+      <td class="select-cell">
+        <input class="cbx" type="checkbox" data-pick="${task.id}"
+               ${picked ? "checked" : ""} ${locked ? "disabled" : ""}
+               title="${locked ? lockHint : "选择这条任务"}"
+               aria-label="选择 ${escapeHtml(task.title)}">
+      </td>
       <td>
         <div class="task-title">
           <strong title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</strong>
-          <span>${escapeHtml(parent)} · ${episode} · ID ${escapeHtml(task.track_id)}</span>
+          <span>${parent} · ${episode} · ID ${escapeHtml(task.track_id)}</span>
           ${error}
         </div>
       </td>
@@ -261,7 +329,16 @@ function taskRow(task) {
           ${chapterTicks(task.progress, task.state)}
         </div>
       </td>
-      <td><button class="row-action" type="button" data-open-task="${task.id}">打开目录</button></td>
+      <td>
+        <div class="row-actions">
+          <button class="row-action" type="button" data-open-task="${task.id}">打开目录</button>
+          <button class="icon-action" type="button" data-delete-task="${task.id}"
+                  ${locked ? "disabled" : ""}
+                  title="${locked ? lockHint : "删除这条任务"}" aria-label="删除">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>
+          </button>
+        </div>
+      </td>
     </tr>`;
 }
 
@@ -455,6 +532,185 @@ async function openDownloads(taskId = null) {
   }
 }
 
+/* ---------- 选择、删除、恢复队列 ---------- */
+
+function togglePick(id, on) {
+  if (on) state.picked.add(id);
+  else state.picked.delete(id);
+  renderTasks();
+}
+
+function togglePagePick() {
+  const page = state.tasks.filter((task) => task.state !== "downloading");
+  const on = page.length > 0 && page.every((task) => state.picked.has(task.id));
+  page.forEach((task) => (on ? state.picked.delete(task.id) : state.picked.add(task.id)));
+  renderTasks();
+}
+
+async function selectAllInScope() {
+  try {
+    const payload = await api(`/api/tasks/ids?${scopeParams()}`);
+    state.picked = new Set(payload.ids || []);
+    renderTasks();
+    if (payload.truncated) {
+      toast(`任务过多，只选中了最近的 ${payload.count} 条`, "error");
+    }
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function clearPick() {
+  state.picked.clear();
+  renderTasks();
+}
+
+/* 不管几条都弹窗：删除的行为必须可预测，用户不该先在脑子里判断
+   「这条是不是已完成」才能预期会发生什么。分档只决定弹窗里说什么。
+
+   明细一律取自后端按真实 id 集算出的 summary——选中集可以跨页，前端手里只有
+   当前页那 100 条，自己统计会漏掉绝大部分，让确认框上的数字撒谎。 */
+async function deletePrompt(ids) {
+  if (!ids.length) return;
+  let summary;
+  try {
+    const payload = await api("/api/tasks/preview", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+    summary = payload.summary || {};
+  } catch (error) {
+    toast(error.message, "error");
+    return;
+  }
+
+  const labels = { pending: "待恢复", done: "已完成", failed: "失败" };
+  const states = summary.states || {};
+  const live = Number(summary.running || 0);
+  const count = Object.values(states).reduce((sum, n) => sum + Number(n), 0);
+  if (!count) {
+    toast(live ? "选中的任务都在下载中，请先优雅停止。" : "选中的任务已不存在。",
+          "error");
+    return;
+  }
+  const single = count === 1 && ids.length === 1;
+  const known = single ? state.tasks.find((task) => task.id === ids[0]) : null;
+
+  const lines = [];
+  if (single && known) {
+    const where = known.album_id ? `专辑 ${escapeHtml(known.album_id)}` : "独立曲目";
+    // 曲目名放正文而不是标题：名字里常自带《》，套进标题会变成双层书名号，
+    // 长标题还会把标题行撑开
+    lines.push(`<div class="line"><i></i><strong>${escapeHtml(known.title)}</strong></div>`);
+    lines.push(`<div class="line"><i></i><span>${labels[known.state] || known.state} · ${where}</span></div>`);
+  } else {
+    const parts = Object.entries(states)
+      .filter(([, n]) => n > 0)
+      .map(([key, n]) => `${labels[key] || key} ${n}`);
+    lines.push(`<div class="line"><i></i><span>${parts.join(" · ")}</span></div>`);
+  }
+  if (summary.with_part) {
+    const scale = single ? "" : `${summary.with_part} 条的`;
+    lines.push(`<div class="line warn"><i></i><span>${scale}未完成进度（约 ${formatBytes(summary.part_bytes)}）会被清除，重新下载需从头开始。</span></div>`);
+  }
+  if (live) {
+    lines.push(`<div class="line skip"><i></i><span>${live} 条正在下载，已跳过（需先优雅停止）。</span></div>`);
+  }
+  if (summary.missing) {
+    lines.push(`<div class="line skip"><i></i><span>${summary.missing} 条已不存在，忽略。</span></div>`);
+  }
+
+  openDialog({
+    title: single ? "删除这条任务？" : `删除选中的 ${count} 条任务？`,
+    sub: "此操作不可撤销。",
+    lines,
+    confirmText: single ? "删除" : `删除 ${count} 条`,
+    onConfirm: () => deleteTasks(ids),
+  });
+}
+
+async function deleteTasks(ids) {
+  try {
+    const payload = await api("/api/tasks/delete", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+    const result = payload.result || {};
+    state.picked.clear();
+    applyTaskPayload(payload, { force: true });
+    polling.lastTaskRefreshAt = Date.now();
+    const bits = [`已删除 ${result.deleted || 0} 条`];
+    if (result.files_removed) bits.push(`清理 ${result.files_removed} 个未完成文件`);
+    if (result.skipped_running) bits.push(`跳过 ${result.skipped_running} 条运行中`);
+    if (result.files_failed) bits.push(`${result.files_failed} 个文件删不掉，可稍后手动清理`);
+    toast(bits.join("，"), result.files_failed ? "error" : "success");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function requeuePicked() {
+  const ids = [...state.picked];
+  if (!ids.length) return;
+  try {
+    const payload = await api("/api/tasks/requeue", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+    state.picked.clear();
+    applyTaskPayload(payload, { force: true });
+    polling.lastTaskRefreshAt = Date.now();
+    toast(payload.requeued
+      ? `已把 ${payload.requeued} 条加入恢复队列，点“恢复全部”开始下载`
+      : "选中的任务里没有可重新排队的失败任务");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function openDialog({ title, sub, lines, confirmText, onConfirm }) {
+  const root = $("#dialog-root");
+  const previous = document.activeElement;
+  root.innerHTML = `
+    <div class="scrim" role="dialog" aria-modal="true" aria-label="${title}">
+      <div class="dialog">
+        <h2>${title}</h2>
+        ${sub ? `<p class="dialog-sub">${sub}</p>` : ""}
+        <div class="consequences">${lines.join("")}</div>
+        <div class="safe-note">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.4-3 7.7-7 9-4-1.3-7-4.6-7-9V6z"/><path d="m9 12 2 2 4-4"/></svg>
+          <span>已下载完成的音频文件<b>不会</b>被删除，只清理任务记录与未完成的临时文件。</span>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" type="button" data-dialog="cancel">取消</button>
+          <button class="button danger" type="button" data-dialog="confirm">${confirmText}</button>
+        </div>
+      </div>
+    </div>`;
+
+  const close = () => {
+    root.innerHTML = "";
+    document.removeEventListener("keydown", onKey, true);
+    if (previous?.isConnected) previous.focus();
+  };
+  const onKey = (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      close();
+    }
+  };
+  document.addEventListener("keydown", onKey, true);
+  // 默认焦点落在取消：回车不该等于确认删除
+  root.querySelector('[data-dialog="cancel"]').focus();
+  root.addEventListener("click", (event) => {
+    if (event.target.classList.contains("scrim")) return close();
+    const button = event.target.closest("[data-dialog]");
+    if (!button) return;
+    close();
+    if (button.dataset.dialog === "confirm") onConfirm();
+  });
+}
+
 async function loadBootstrap(populateSettings = true) {
   try {
     const payload = await api("/api/bootstrap");
@@ -484,7 +740,16 @@ function taskQueryPath() {
   });
   if (state.filter !== "all") params.set("state", state.filter);
   if (state.search.trim()) params.set("search", state.search.trim().slice(0, 200));
+  if (state.album) params.set("album_id", state.album);
   return `/api/tasks?${params}`;
+}
+
+function scopeParams() {
+  const params = new URLSearchParams();
+  if (state.filter !== "all") params.set("state", state.filter);
+  if (state.search.trim()) params.set("search", state.search.trim().slice(0, 200));
+  if (state.album) params.set("album_id", state.album);
+  return params;
 }
 
 async function loadTaskPage() {
@@ -678,15 +943,21 @@ document.addEventListener("click", (event) => {
 
   const filter = event.target.closest("[data-filter]");
   if (filter) {
-    state.filter = filter.dataset.filter;
-    state.page.offset = 0;
     $$('[data-filter]').forEach((button) => button.classList.toggle("is-active", button === filter));
     renderCounts();
-    loadTaskPage();
+    resetScope({ filter: filter.dataset.filter });
+  }
+
+  const albumLink = event.target.closest("[data-album-id]");
+  if (albumLink) {
+    resetScope({ album: albumLink.dataset.albumId, albumTitle: "" });
   }
 
   const taskButton = event.target.closest("[data-open-task]");
   if (taskButton) openDownloads(Number(taskButton.dataset.openTask));
+
+  const deleteButton = event.target.closest("[data-delete-task]");
+  if (deleteButton) deletePrompt([Number(deleteButton.dataset.deleteTask)]);
 
   const action = event.target.closest("[data-action]")?.dataset.action;
   if (!action) return;
@@ -699,6 +970,11 @@ document.addEventListener("click", (event) => {
     "refresh-risk": () => loadRiskReport(true),
     "tasks-previous": () => changeTaskPage(-1),
     "tasks-next": () => changeTaskPage(1),
+    "select-all": selectAllInScope,
+    "clear-pick": clearPick,
+    "clear-album": () => resetScope({ album: "", albumTitle: "" }),
+    "delete-picked": () => deletePrompt([...state.picked]),
+    "requeue-picked": requeuePicked,
     "refresh-cookies": () => startOperation("/api/operations/refresh-cookies", {
       headless: !$("#cookies-visible").checked,
     }),
@@ -751,11 +1027,22 @@ $("#settings-form").addEventListener("change", (event) => {
   if (event.target?.name === "browser") renderBrowserNote();
 });
 
+$("#task-list").addEventListener("change", (event) => {
+  const box = event.target.closest("[data-pick]");
+  if (box) togglePick(Number(box.dataset.pick), box.checked);
+});
+
+$("#head-check").addEventListener("change", togglePagePick);
+
 $("#task-search").addEventListener("input", (event) => {
   state.search = event.target.value;
   state.page.offset = 0;
+  // 搜索改变了范围，选中集随之失效；防抖期间不清，等请求真的发出去时才清
   window.clearTimeout(polling.searchTimer);
-  polling.searchTimer = window.setTimeout(loadTaskPage, 300);
+  polling.searchTimer = window.setTimeout(() => {
+    state.picked.clear();
+    loadTaskPage();
+  }, 300);
 });
 
 document.addEventListener("visibilitychange", () => {

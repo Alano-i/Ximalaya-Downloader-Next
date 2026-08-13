@@ -9,7 +9,8 @@ from xdl.domain import DownloadTask, TaskState
 from xdl.errors import CancelledByUser
 from xdl.frontends.web_runtime import (OperationBusyError,
                                        WebRuntime)
-from xdl.ports import TaskQueryResult
+from xdl.ports import (TaskDeleteResult, TaskQueryResult,
+                       TaskSelectionSummary)
 from xdl.settings import Settings
 
 
@@ -34,15 +35,61 @@ class FakeFacade:
     def all_tasks(self):
         return self.tasks
 
-    def query_tasks(self, *, state=None, search="", limit=100, offset=0):
+    def _scoped(self, state, search, album_id):
         rows = self.tasks
         if state is not None:
             rows = [task for task in rows if task.state is state]
+        if album_id:
+            rows = [task for task in rows if task.album_id == album_id]
         query = search.casefold().strip()
         if query:
             rows = [task for task in rows if query in (
                 f"{task.title} {task.track_id} {task.album_id}".casefold()
             )]
+        return rows
+
+    def query_task_ids(self, *, state=None, search="", album_id="", cap=5000):
+        return [task.id for task in self._scoped(state, search, album_id)][:cap]
+
+    def summarize_tasks(self, ids):
+        found = [task for task in self.tasks if task.id in set(ids)]
+        states = {}
+        running = 0
+        for task in found:
+            if task.state is TaskState.DOWNLOADING:
+                running += 1
+                continue
+            states[task.state.value] = states.get(task.state.value, 0) + 1
+        return TaskSelectionSummary(
+            states=states, running=running,
+            missing=len(set(ids)) - len(found),
+        )
+
+    def delete_tasks(self, ids):
+        wanted = set(ids)
+        killable = [task for task in self.tasks
+                    if task.id in wanted and task.state is not TaskState.DOWNLOADING]
+        running = len([task for task in self.tasks
+                       if task.id in wanted and task.state is TaskState.DOWNLOADING])
+        found = len([task for task in self.tasks if task.id in wanted])
+        self.tasks = [task for task in self.tasks if task not in killable]
+        return TaskDeleteResult(
+            deleted=len(killable), skipped_running=running,
+            missing=len(wanted) - found,
+        )
+
+    def requeue_tasks(self, ids):
+        wanted = set(ids)
+        changed = 0
+        for task in self.tasks:
+            if task.id in wanted and task.state is TaskState.FAILED:
+                task.state = TaskState.PENDING
+                changed += 1
+        return changed
+
+    def query_tasks(self, *, state=None, search="", album_id="",
+                    limit=100, offset=0):
+        rows = self._scoped(state, search, album_id)
         counts = {task_state: 0 for task_state in TaskState}
         for task in self.tasks:
             counts[task.state] += 1
@@ -201,3 +248,61 @@ def test_runtime_open_downloads_uses_configured_directory(tmp_path, monkeypatch)
 
     assert result["path"] == os.path.abspath(tmp_path / "downloads")
     assert opened == [result["path"]]
+
+
+def test_runtime_delete_tasks_reports_detail_and_refreshes(tmp_path):
+    runtime = WebRuntime(_settings(tmp_path), facade=FakeFacade(),
+                         persist_settings=False)
+
+    payload = runtime.delete_tasks([1, 2, 2, 4242])
+
+    # 1 是 downloading，删不掉；2 可删；4242 不存在
+    assert payload["result"]["deleted"] == 1
+    assert payload["result"]["skipped_running"] == 1
+    assert payload["result"]["missing"] == 1
+    # 删完顺带回一份新快照，前端不用再发一次请求
+    assert [task["id"] for task in payload["tasks"]] == [1]
+
+
+def test_runtime_delete_tasks_rejects_oversized_selection(tmp_path):
+    runtime = WebRuntime(_settings(tmp_path), facade=FakeFacade(),
+                         persist_settings=False)
+
+    with pytest.raises(ValueError, match="一次最多操作"):
+        runtime.delete_tasks(list(range(6000)))
+
+
+def test_runtime_delete_works_while_an_operation_runs(tmp_path):
+    """删除不走操作锁：挂着大专辑跑几小时时也得能清理历史。"""
+    facade = FakeFacade(blocking=True)
+    runtime = WebRuntime(_settings(tmp_path), facade=facade,
+                         persist_settings=False)
+    runtime.start_download(mode="track", target="123")
+    assert facade.started.wait(2)
+
+    payload = runtime.delete_tasks([2])
+
+    assert payload["result"]["deleted"] == 1
+    runtime.request_stop()
+    runtime.wait()
+
+
+def test_runtime_task_ids_snapshot_is_scoped(tmp_path):
+    runtime = WebRuntime(_settings(tmp_path), facade=FakeFacade(),
+                         persist_settings=False)
+
+    assert runtime.task_ids()["count"] == 2
+    assert runtime.task_ids(state="done")["ids"] == [2]
+    assert runtime.task_ids(album_id="nope")["ids"] == []
+    assert runtime.task_ids()["truncated"] is False
+
+
+def test_runtime_requeue_tasks_counts_changes(tmp_path):
+    facade = FakeFacade()
+    facade.tasks[1].state = TaskState.FAILED
+    runtime = WebRuntime(_settings(tmp_path), facade=facade,
+                         persist_settings=False)
+
+    payload = runtime.requeue_tasks([1, 2])
+
+    assert payload["requeued"] == 1     # 只有 failed 那条被放回队列

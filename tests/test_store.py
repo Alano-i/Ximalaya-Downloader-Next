@@ -188,3 +188,125 @@ def test_store_wraps_method_sqlite_errors():
 
     with pytest.raises(StorageError, match="任务库操作失败"):
         store.pending_albums()
+
+
+def _seed(store, tasks):
+    """写入任务并返回带 id 的行。"""
+    return store.upsert_pending(tasks)
+
+
+def test_query_tasks_album_filter_is_exact(tmp_path):
+    """album_id 精确匹配：它圈定的是删除范围，模糊会跨专辑误伤。"""
+    store = SqliteTaskStore(str(tmp_path / "tasks.db"))
+    try:
+        _seed(store, [
+            _task(track_id="1", album_id="1234", index=1),
+            _task(track_id="2", album_id="1234", index=2),
+            _task(track_id="3", album_id="12345", index=1),
+        ])
+
+        assert store.query_tasks(album_id="1234").total == 2
+        # 搜索仍是模糊的——它只用来找东西
+        assert store.query_tasks(search="1234").total == 3
+        assert store.query_task_ids(album_id="12345") != []
+        assert len(store.query_task_ids(album_id="1234")) == 2
+    finally:
+        store.close()
+
+
+def test_delete_tasks_skips_running_and_clears_part_files(tmp_path):
+    store = SqliteTaskStore(str(tmp_path / "tasks.db"))
+    part = tmp_path / "第2集.part"
+    part.write_text("half", encoding="utf-8")
+    (tmp_path / "第2集.part.meta").write_text("{}", encoding="utf-8")
+    try:
+        rows = _seed(store, [_task(track_id="1", index=1),
+                             _task(track_id="2", index=2)])
+        store.record_progress(rows[1].id, 4, 8)  # pending 状态下是 no-op，仅为对齐真实调用
+        conn = sqlite3.connect(tmp_path / "tasks.db")
+        conn.execute("UPDATE download_task SET part_path=? WHERE id=?",
+                     (str(part), rows[1].id))
+        conn.commit()
+        conn.close()
+        store.mark_downloading(rows[0].id)
+
+        result = store.delete_tasks([rows[0].id, rows[1].id, 4242])
+
+        assert result.deleted == 1
+        assert result.skipped_running == 1     # 运行中的删不掉
+        assert result.missing == 1             # 不存在的 id 静默跳过
+        assert result.files_removed == 2       # .part 和 .part.meta
+        assert not part.exists()
+        assert [t.id for t in store.all_tasks()] == [rows[0].id]
+    finally:
+        store.close()
+
+
+def test_delete_tasks_prunes_orphan_album_rows(tmp_path):
+    store = SqliteTaskStore(str(tmp_path / "tasks.db"))
+    try:
+        rows = _seed(store, [_task(track_id="1", album_id="keep", index=1),
+                             _task(track_id="2", album_id="gone", index=1)])
+        store.save_album_meta("keep", "留下", 10)
+        store.save_album_meta("gone", "删光", 10)
+
+        store.delete_tasks([rows[1].id])
+
+        assert store.album_total("keep") == 10
+        assert store.album_total("gone") == 0   # 孤儿元数据已清
+    finally:
+        store.close()
+
+
+def test_summarize_tasks_counts_by_state_and_part_bytes(tmp_path):
+    store = SqliteTaskStore(str(tmp_path / "tasks.db"))
+    try:
+        rows = _seed(store, [_task(track_id=str(i), index=i) for i in (1, 2, 3)])
+        store.mark_done(rows[0].id, "/out/1.m4a")
+        store.mark_downloading(rows[1].id)
+        store.record_progress(rows[1].id, 512, 1024)
+        conn = sqlite3.connect(tmp_path / "tasks.db")
+        conn.execute("UPDATE download_task SET part_path=? WHERE id=?",
+                     ("/out/3.part", rows[2].id))
+        conn.execute("UPDATE download_task SET bytes_done=64 WHERE id=?",
+                     (rows[2].id,))
+        conn.commit()
+        conn.close()
+
+        summary = store.summarize_tasks([r.id for r in rows] + [999])
+
+        assert summary.states == {"done": 1, "pending": 1}
+        assert summary.running == 1        # downloading 单独计，不进 states
+        assert summary.with_part == 1
+        assert summary.part_bytes == 64
+        assert summary.missing == 1
+    finally:
+        store.close()
+
+
+def test_requeue_tasks_only_revives_failed(tmp_path):
+    store = SqliteTaskStore(str(tmp_path / "tasks.db"))
+    try:
+        rows = _seed(store, [_task(track_id="1", index=1),
+                             _task(track_id="2", index=2)])
+        store.mark_failed(rows[0].id, "api", "已下架", False)
+
+        assert store.requeue_tasks([rows[0].id, rows[1].id]) == 1
+
+        states = {t.id: t.state for t in store.all_tasks()}
+        assert states[rows[0].id] is TaskState.PENDING
+        assert store.query_tasks(state=TaskState.FAILED).total == 0
+    finally:
+        store.close()
+
+
+def test_delete_tasks_handles_empty_and_duplicate_ids(tmp_path):
+    store = SqliteTaskStore(str(tmp_path / "tasks.db"))
+    try:
+        rows = _seed(store, [_task(track_id="1", index=1)])
+
+        assert store.delete_tasks([]).deleted == 0
+        result = store.delete_tasks([rows[0].id, rows[0].id])
+        assert result.deleted == 1 and result.missing == 0
+    finally:
+        store.close()

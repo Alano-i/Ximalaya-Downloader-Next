@@ -5,14 +5,16 @@
 """
 import json
 import re
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 import requests
 
 from xdl.adapters.source_pc import PcHttpSource, _random_xm_sign
+from xdl.adapters.sign.cookies import ensure_pc_device_cookies
 from xdl.domain import Album, Track
-from xdl.errors import AuthError, NetworkError, RiskControlError
+from xdl.errors import ApiError, AuthError, NetworkError, RiskControlError
 
 try:
     from curl_cffi.curl import CurlError
@@ -107,6 +109,71 @@ TRACK_QUALITY_OK = {
     },
 }
 
+# VIP/付费曲目的 track/quality：playPathDto 只有 size 字段，明文地址全空
+# （2026-08-16 对 sound/562111701 实测抓包形态）。
+TRACK_QUALITY_VIP = {
+    "ret": 0,
+    "data": {
+        "trackQualities": [
+            {"qualityLevel": 1, "qualityName": "高清音质", "fileSize": 778633},
+            {"qualityLevel": 0, "qualityName": "标准音质", "fileSize": 396184},
+        ],
+        "debugInfo": {
+            "debugDetailMap": {
+                "detailTrackDto": {
+                    "result": {
+                        "title": "VIP 测试曲目",
+                        "isPaid": True,
+                        "paidDto": {"price": "69.99"},
+                        "playPathDto": {
+                            "mp332Size": 510895,
+                            "mp364Size": 1021536,
+                            "hqSize": 1545465,
+                            "aacV164Size": 778633,
+                            "aacV224Size": 396184,
+                            "originPlayPath": (
+                                "storages/5bbc-audiofreehighqps/D2/CE/..."
+                            ),
+                        },
+                    }
+                }
+            }
+        },
+    },
+}
+
+# baseInfo 加密 playUrlList（2026-08-16 device=win 实测抓包原样，含 M4A_64 一档）
+BASE_INFO_VIP = {
+    "ret": 0,
+    "trackInfo": {
+        "trackId": 562111701,
+        "title": "VIP 测试曲目",
+        "isPaid": True,
+        "isAuthorized": True,
+        "isAntiLeech": True,
+        "playUrlList": [
+            {
+                "type": "M4A_64",
+                "fileSize": 778633,
+                "url": (
+                    "pX7rCko1ZPLJXbyU3qjcDqAp042BK5yCrhhNlUZEBd6lHKILemhbvHD1Ykh"
+                    "Q7FDbZ6QeFPVzxfDH4ro44BplhjCgjgi1xHnlrJR4LEJnIxSIqEnytSBJZBu"
+                    "LBAEdE9dCViixIhz8NdLDFMG_tpDh88M2_tnqioJ8JnJYj9h6bGNGrP3_G4o"
+                    "OHrz6CGZi024CBS40BG45LdipAuHAOq7_CW_pp9Vb9GgSgezuKF1AZhO0tGh"
+                    "EOgUN0QHjzR2N8BTTIFO9u4CefQFTcaN3xzaDV7v7sxPZBhl73fvYnF153Rg"
+                ),
+            },
+        ],
+    },
+}
+
+PAID_URL = (
+    "https://audiopay.cos.tx.xmcdn.com/download/1.0.0/storages/"
+    "3cf3-audiopay/85/1E/GKwRIasG02T_AA_K1QGTsZLv-aacv2-48K.m4a"
+    "?sign=e3707760ec267ee5610476fb609dbde6&buy_key=FM"
+    "&timestamp=1786865983207000&token=8989&duration=127"
+)
+
 
 def _make_source(monkeypatch, responses):
     """按 URL 关键字路由响应；未命中的抛断言。"""
@@ -132,9 +199,62 @@ def _make_source(monkeypatch, responses):
     return src
 
 
+class FakeSignProvider:
+    """返回固定 xm-sign，不发起任何上报请求。"""
+
+    def open(self):
+        pass
+
+    def close(self):
+        pass
+
+    def sign(self):
+        return "cadd&&sid"
+
+
 def test_random_sign_format():
     sign = _random_xm_sign()
     assert re.fullmatch(r"\d{13}&[0-9a-f]{16}", sign)
+
+
+def test_ensure_pc_device_cookies_formats():
+    base = [{"name": "1&_token", "value": "tok", "domain": ".ximalaya.com",
+             "path": "/"}]
+    out = ensure_pc_device_cookies(base)
+    names = {c["name"] for c in out}
+    assert {"install_id", "channel", "1&_device"} <= names
+    by_name = {c["name"]: c for c in out}
+    device = by_name["1&_device"]["value"]
+    install = by_name["install_id"]["value"]
+    assert device == f"win32&{install}&4.0.14"
+    assert by_name["channel"]["value"] == "99&100001"
+    # 已有设备字段时原样保留，不重复生成
+    again = ensure_pc_device_cookies(out)
+    assert {c["name"]: c["value"] for c in again} == {
+        c["name"]: c["value"] for c in out
+    }
+    assert len(again) == len(out)
+
+
+def test_load_cookies_auto_adds_pc_device_cookies(monkeypatch):
+    cached = [{"name": "1&_token", "value": "tok", "domain": ".ximalaya.com",
+               "path": "/"}]
+    saved = []
+    monkeypatch.setattr(
+        "xdl.adapters.source_pc.load_cached_cookies", lambda *a, **kw: cached,
+    )
+    monkeypatch.setattr(
+        "xdl.adapters.source_pc.save_cookies",
+        lambda cookies, path: saved.append(cookies),
+    )
+    src = PcHttpSource(cookies_cache_path=r"C:\tmp\c.json", profile_dir="",
+                       impersonate="")
+    asyncio.run(src._load_cookies())
+    header = src._cookie_header
+    assert "install_id=" in header
+    assert "1&_device=" in header
+    assert "channel=" in header
+    assert saved and saved[0] is src._cookies
 
 
 def test_get_album_parses_tracks(monkeypatch):
@@ -196,6 +316,56 @@ def test_get_track_parses_quality_and_excludes_download(monkeypatch):
     assert all(p.url.startswith("http://aod.cos.tx.xmcdn.com") for p in urls)
     m4a64 = next(p for p in urls if p.type == "M4A_64")
     assert m4a64.file_size == 18265227
+
+
+def test_get_track_vip_falls_back_to_base_info(monkeypatch):
+    """VIP 曲目 track/quality 无明文地址时，走 baseInfo 解密兜底。"""
+    seen = {}
+
+    def fake_get(url, params, headers):
+        if "baseInfo" in url:
+            seen["params"] = params
+        for key, payload in {
+            "play/v1/audio": PLAY_AUDIO_OK,
+            "track/quality": TRACK_QUALITY_VIP,
+            "baseInfo": BASE_INFO_VIP,
+        }.items():
+            if key in url:
+                return FakeResp(payload)
+        raise AssertionError(f"未预期请求: {url}")
+
+    src = _make_source(monkeypatch, {
+        "play/v1/audio": PLAY_AUDIO_OK,
+        "track/quality": TRACK_QUALITY_VIP,
+        "baseInfo": BASE_INFO_VIP,
+    })
+    src._sign_provider = FakeSignProvider()
+    monkeypatch.setattr(src, "_http_get", fake_get)
+
+    track = src._get_track_sync("562111701")
+    assert isinstance(track, Track)
+    assert track.is_paid is True
+    assert track.is_authorized is True
+    assert seen["params"]["device"] == "win"
+    urls = track.available_play_urls()
+    assert [p.type for p in urls] == ["M4A_64"]
+    assert urls[0].url == PAID_URL
+    assert urls[0].file_size == 778633
+
+
+def test_get_track_vip_base_info_empty_raises(monkeypatch):
+    """track/quality 空且 baseInfo 也拿不到地址时，报不可重试 ApiError。"""
+    src = _make_source(monkeypatch, {
+        "play/v1/audio": PLAY_AUDIO_OK,
+        "track/quality": TRACK_QUALITY_VIP,
+        "baseInfo": {"ret": 0, "trackInfo": {"playUrlList": []}},
+    })
+    src._sign_provider = FakeSignProvider()
+
+    with pytest.raises(ApiError) as exc:
+        src._get_track_sync("562111701")
+    assert exc.value.retryable is False
+    assert "baseInfo" in str(exc.value)
 
 
 def test_get_track_denied_raises_auth_error(monkeypatch):

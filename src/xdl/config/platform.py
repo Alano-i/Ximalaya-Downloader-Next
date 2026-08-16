@@ -33,6 +33,11 @@ TRACK_QUALITY_URL = (
     MOBILE_BASE + "/mobile-playpage/playpage/track/quality/{track_id}/{ts}"
 )
 
+# PC 桌面端（device=win）baseInfo 的 playUrlList 密文解密：AES-ECB + PKCS7，
+# 密文为 URL-safe Base64。密钥提取自官方客户端 4.0.14 asar 的 Gt 函数
+# （Wt.AES.decrypt(... Hex.parse("aaad3e4fd540b0f79dca95606e72bf93") ...)）。
+WIN_PLAY_URL_AES_KEY = "aaad3e4fd540b0f79dca95606e72bf93"
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
 

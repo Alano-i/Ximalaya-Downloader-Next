@@ -16,11 +16,25 @@ import json
 import os
 import tempfile
 import time
+import uuid
 from typing import Iterable
 
 from ...config import platform
 
 _LOGIN_COOKIE_SUFFIX = "&_token"
+
+# PC 桌面端接口（play/v1/*、baseInfo）要求请求里带客户端设备身份 Cookie；
+# 缺任意一项时，付费曲目在 baseInfo 会被风控（ret=1001 系统繁忙）。Web 端
+# `xdl login` 不会种这三项，这里按官方 PC 客户端 4.0.14 抓包格式自动补全。
+_PC_DEVICE_COOKIES = (
+    # install_id / channel：埋点接口种在 .pc.ximalaya.com
+    ("install_id", "{uuid}", ".pc.ximalaya.com",
+     "/pc-application-server/burying/pcClient"),
+    ("channel", "99&100001", ".pc.ximalaya.com",
+     "/pc-application-server/burying/pcClient"),
+    # 1&_device：win32&<设备UUID>&4.0.14，与 install_id 同设备 ID
+    ("1&_device", "win32&{uuid}&4.0.14", ".ximalaya.com", "/"),
+)
 
 # 设备/反垃圾/埋点类 Cookie。剥离它们可在 HTTP 路径上让身份主要跟
 # xm-sign 的 device_info 走，避免 Cookie 碎片把“新身”粘回旧惩罚态。
@@ -73,6 +87,30 @@ def is_login_cookie(cookies: Iterable[dict]) -> bool:
         str(c.get("name") or "").endswith(_LOGIN_COOKIE_SUFFIX) and bool(c.get("value"))
         for c in cookies
     )
+
+
+def ensure_pc_device_cookies(cookies: list[dict]) -> list[dict]:
+    """补全 PC 桌面端接口所需的设备身份 Cookie；已有同名值则原样保留。
+
+    返回追加了缺失项的新列表（不改动传入列表）。值按官方客户端 4.0.14
+    抓包格式生成：``install_id`` 为 36 位 UUID，``1&_device`` 为
+    ``win32&<同一UUID>&4.0.14``，``channel`` 为 ``99&100001``。
+    """
+    existing = {c.get("name") for c in cookies}
+    if all(name in existing for name, _fmt, _dom, _path in _PC_DEVICE_COOKIES):
+        return list(cookies)
+    dev_uuid = str(uuid.uuid4())
+    extended = list(cookies)
+    for name, fmt, domain, path in _PC_DEVICE_COOKIES:
+        if name in existing:
+            continue
+        extended.append({
+            "name": name,
+            "value": fmt.format(uuid=dev_uuid),
+            "domain": domain,
+            "path": path,
+        })
+    return extended
 
 
 def is_login_related_cookie(name) -> bool:

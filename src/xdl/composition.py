@@ -77,8 +77,11 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             browser=browser,
         )
     if backend == "pc":
-        # PC 桌面端接口：play/v1/show（列表）+ track/quality（播放地址），
-        # 解析链路更简单，无需 SignProvider/Decoder。登录仍走 ChromeSource 兜底。
+        # PC 桌面端接口：play/v1/show（列表）+ track/quality（播放地址）。
+        # 免费曲目走 track/quality 明文地址；VIP/付费曲目 playPathDto 全空，
+        # 自动兜底到 baseInfo（PC 客户端抓包链路同款接口，device=win）+
+        # WinEcbDecoder 解密加密 playUrlList，因此也需要 SignProvider。
+        # 登录仍走 ChromeSource 兜底。
         chrome_fallback = ChromeSource(
             decoder,
             chrome_path=settings.chrome_path,
@@ -101,6 +104,9 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             chrome_fallback=chrome_fallback,
             impersonate=settings.source_impersonate,
             browser=browser,
+            decoder=decoder,
+            sign_provider=PySignProvider(device_info_path=settings.device_info_path),
+            device_info_path=settings.device_info_path,
         )
     if backend == "chrome":
         # 兼容路径：CDP 接管真实浏览器（Chrome 或 Edge，跟随 browser 设置）。

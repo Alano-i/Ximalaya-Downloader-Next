@@ -28,13 +28,16 @@ except ImportError:
     CffiRequestError = ()
     _HAS_CURL_CFFI = False
 
-from ..config import platform
+from ..config import platform, sign as sign_conf
 from ..domain import Album, AlbumTrack, PlayUrl, Track
-from ..errors import (ApiError, AuthError, ConfigError, NetworkError,
-                      RiskControlError)
+from ..errors import (ApiError, AuthError, ConfigError, DecodeError,
+                      NetworkError, RiskControlError)
 from ..risk import RiskEventRecorder
+from .decoder import WinEcbDecoder
+from .sign.py_sign import PySignProvider
 from .sign.cookies import (build_cookie_header, extract_cookies_from_profile,
-                           is_login_cookie, load_cached_cookies, save_cookies)
+                           ensure_pc_device_cookies, is_login_cookie,
+                           load_cached_cookies, save_cookies)
 
 _AUTH_RETS = {927}
 _MAX_PAGES = 2000
@@ -109,6 +112,10 @@ class PcHttpSource:
         impersonate: str = "chrome146",
         browser: str = "chrome",
         cookie_max_age: int = 1800,
+        decoder=None,
+        sign_provider=None,
+        device_info_path: str = "",
+        win_decoder=None,
     ):
         self._chrome_path = chrome_path
         self._profile_dir = profile_dir
@@ -122,6 +129,10 @@ class PcHttpSource:
             platform.infer_browser_from_path(chrome_path) or browser
         )
         self._cookie_max_age = cookie_max_age
+        self._decoder = decoder
+        self._sign_provider = sign_provider
+        self._device_info_path = device_info_path
+        self._win_decoder = win_decoder
         self._session_id = str(uuid.uuid4())
         self._request_index = 0
         # 线程级连接复用：curl_cffi 的 Session 非线程安全，asyncio.to_thread
@@ -136,6 +147,7 @@ class PcHttpSource:
     # ---- Source 端口：会话生命周期 ----
     async def open(self) -> None:
         await self._load_cookies()
+        self._ensure_sign()
 
     async def close(self) -> None:
         session = getattr(self._local, "session", None)
@@ -145,6 +157,11 @@ class PcHttpSource:
             except Exception:
                 pass
             self._local.session = None
+        if self._sign_provider is not None:
+            try:
+                self._sign_provider.close()
+            except Exception:
+                pass
 
     def _get_session(self):
         """返回当前线程的 curl_cffi Session（懒创建、复用）。"""
@@ -154,6 +171,23 @@ class PcHttpSource:
             self._local.session = session
         return session
 
+    def _ensure_sign(self):
+        """惰性创建并打开 baseInfo 所需的 xm-sign 提供者。"""
+        if self._sign_provider is None:
+            self._sign_provider = PySignProvider(
+                device_info_path=self._device_info_path or None,
+            )
+        self._sign_provider.open()
+
+    def _ensure_win_decoder(self):
+        """惰性创建 PC 端（device=win）playUrlList 解密器。"""
+        if self._win_decoder is None:
+            if isinstance(self._decoder, WinEcbDecoder):
+                self._win_decoder = self._decoder
+            else:
+                self._win_decoder = WinEcbDecoder()
+        return self._win_decoder
+
     async def _load_cookies(self) -> None:
         cached = (
             await asyncio.to_thread(
@@ -162,7 +196,13 @@ class PcHttpSource:
             if self._cookies_cache_path else None
         )
         if cached and is_login_cookie(cached):
-            self._cookies = cached
+            # Web 端登录态缺 PC 客户端设备 Cookie（install_id/1&_device/
+            # channel），baseInfo 会因此风控；按客户端格式补全并回写缓存。
+            self._cookies = ensure_pc_device_cookies(cached)
+            if len(self._cookies) != len(cached) and self._cookies_cache_path:
+                await asyncio.to_thread(
+                    save_cookies, self._cookies, self._cookies_cache_path,
+                )
         else:
             if not self._profile_dir or not os.path.isdir(self._profile_dir):
                 raise ConfigError(
@@ -179,6 +219,7 @@ class PcHttpSource:
                 or "chrome",
             )
             if is_login_cookie(self._cookies) and self._cookies_cache_path:
+                self._cookies = ensure_pc_device_cookies(self._cookies)
                 await asyncio.to_thread(
                     save_cookies, self._cookies, self._cookies_cache_path,
                 )
@@ -385,15 +426,87 @@ class PcHttpSource:
                 file_size=int(play_path_dto.get(size_field) or 0),
             ))
         if not play_urls:
-            raise ApiError(
-                f"track/quality 未返回任何播放地址（trackId={track_id}）。",
-                ret=ret, retryable=True,
-            )
+            # VIP/付费曲目：playPathDto 通常只有 size 字段、明文地址全空，
+            # 播放地址要走 baseInfo 加密 playUrlList 解密链路（PC 客户端
+            # 同样先调 baseInfo 再解密，见 .capture/play_request_analysis.md）。
+            return self._fetch_paid_track(track_id)
         return Track(
             track_id=str(track_id),
             title=result.get("title") or str(track_id),
             play_urls=play_urls,
             is_paid=bool(result.get("isPaid")),
+            is_authorized=True,
+        )
+
+    def _fetch_paid_track(self, track_id: str) -> Track:
+        """付费曲目兜底：baseInfo 加密 playUrlList → WinEcbDecoder 解密。
+
+        PC 客户端对 VIP 音频的实际链路：play/v1/audio 判权通过后，播放地址
+        来自 track/v3/baseInfo 的加密 playUrlList（isAntiLeech=true），客户端
+        用 AES-ECB（密钥见 platform.WIN_PLAY_URL_AES_KEY）解密后得到
+        audiopay.cos.tx.xmcdn.com/download/...?sign=&buy_key=&timestamp=&token=
+        &duration= 这类可直接 GET 的付费 CDN 地址；track/quality 对付费曲目
+        不返回明文地址。device 与桌面客户端一致用 win。
+        """
+        self._ensure_sign()
+        decoder = self._ensure_win_decoder()
+        url = sign_conf.BASE_INFO_URL.format(ts=int(time.time() * 1000))
+        params = {
+            "device": "win",
+            "trackId": str(track_id),
+            "trackQualityLevel": "1",
+        }
+        headers = self._headers(
+            platform.SOUND_URL.format(track_id=track_id),
+            platform.BASE,
+            with_sign=False,
+        )
+        headers["xm-sign"] = self._sign_provider.sign()
+        try:
+            resp = self._http_get(url, params, headers)
+            body = resp.json()
+        except requests.RequestException as e:
+            raise NetworkError(f"baseInfo 请求失败: {e}") from e
+        except ValueError as e:
+            raise ApiError(
+                f"baseInfo 响应不是 JSON：{resp.text[:200]!r}",
+                ret=None, retryable=True,
+            ) from e
+        ret = body.get("ret")
+        data = body.get("data") or {}
+        track_info = data.get("trackInfo") or body.get("trackInfo") or {}
+        play_url_list = track_info.get("playUrlList") or []
+        if ret not in (0, 200):
+            _raise_for_ret(ret, body.get("msg"),
+                           authenticated=self._authenticated)
+
+        play_urls: list[PlayUrl] = []
+        for item in play_url_list:
+            enc = item.get("url")
+            if not enc:
+                continue
+            try:
+                real = decoder.decode(enc)
+            except DecodeError:
+                continue
+            if not real.startswith("http"):
+                continue
+            play_urls.append(PlayUrl(
+                type=item.get("type", ""),
+                url=real,
+                file_size=int(item.get("fileSize", 0) or 0),
+            ))
+        if not play_urls:
+            raise ApiError(
+                f"baseInfo 未返回可解密播放地址（trackId={track_id}）。"
+                "可能无播放权限或加密方式已变化。",
+                ret=ret, retryable=False,
+            )
+        return Track(
+            track_id=str(track_id),
+            title=track_info.get("title") or str(track_id),
+            play_urls=play_urls,
+            is_paid=True,
             is_authorized=True,
         )
 
@@ -411,6 +524,7 @@ class PcHttpSource:
                 "chrome_fallback 未提供登录 Cookie 捕获结果；无法安全保存登录态。"
             )
         cookies = take_cookies()
+        cookies = ensure_pc_device_cookies(cookies)
         if not is_login_cookie(cookies):
             raise AuthError(
                 f"专用 {self._browser_name} Profile 中未发现登录 token（1&_token）；"

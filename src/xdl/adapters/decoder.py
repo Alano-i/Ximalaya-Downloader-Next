@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import base64
 
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+
 from ..config import platform
 from ..errors import DecodeError
 
@@ -52,3 +55,38 @@ class Www2Decoder:
                 body[i + j] ^= self._xor[j]
 
         return body.decode("utf-8", errors="replace")
+
+
+class WinEcbDecoder:
+    """PC 桌面端（device=win）的音频 URL 解密。
+
+    PC 客户端 4.0.14 对 baseInfo 返回的 playUrlList 使用 AES-ECB/PKCS7 加密：
+    密文是 URL-safe Base64（``_``/``-`` 变体），密钥见
+    ``platform.WIN_PLAY_URL_AES_KEY``（提取自客户端 asar 的 Gt 函数）。
+    解出的是 audiopay.cos.tx.xmcdn.com/download/... 带签名参数的付费地址。
+    """
+
+    def __init__(self, key_hex: str | None = None):
+        self._key = bytes.fromhex(key_hex or platform.WIN_PLAY_URL_AES_KEY)
+
+    def decode(self, encrypted_url: str) -> str:
+        if not encrypted_url:
+            return ""
+        # 已是明文直接返回
+        if encrypted_url.startswith("http"):
+            return encrypted_url
+
+        cleaned = encrypted_url.replace("_", "/").replace("-", "+")
+        cleaned += "=" * (-len(cleaned) % 4)   # 补齐 base64 padding
+        try:
+            decoded = base64.b64decode(cleaned)
+        except Exception as e:
+            raise DecodeError(f"Base64 解码失败: {e}") from e
+        try:
+            plain = unpad(
+                AES.new(self._key, AES.MODE_ECB).decrypt(decoded),
+                AES.block_size,
+            )
+        except (ValueError, TypeError) as e:
+            raise DecodeError(f"AES-ECB 解密失败: {e}") from e
+        return plain.decode("utf-8", errors="replace")

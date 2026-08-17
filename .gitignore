@@ -3,6 +3,16 @@
 .local/
 # 抓包产物（含真实登录凭据，不入库）
 .capture/
+# 逆向分析产物：jadx 反编译的官方 app 源码、调研笔记、patch 草稿。
+# 体量大且含第三方专有代码，只在本地留存，不进版本库。
+work/
+.trace/
+
+# ===== APK 协议 native 资产（不入库）=====
+# 下载链路默认走 adapters/apk/native_py.py 的纯 Python 实现，不需要这些文件。
+# 只有 prefer_python=False 的差分测试才用得到，请按 README 自行从官方 APK 提取。
+vendor/apk_protocol/*
+!vendor/apk_protocol/README.md
 
 # ===== 下载产物与运行时数据 =====
 download/

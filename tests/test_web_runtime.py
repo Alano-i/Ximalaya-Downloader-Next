@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -118,8 +119,16 @@ class FakeFacade:
     def resume(self, reporter=None, cancel=None):
         return [AlbumResult("测试专辑", skipped=["a.mp3"])]
 
-    def login(self):
+    def login(self, *, reset=False, cancel=None, notify=None):
+        self.login_wait = {"reset": reset, "cancel": cancel, "notify": notify}
+        if notify is not None:
+            notify("已打开浏览器，请完成登录。")
         return "/tmp/profile"
+
+    def logout(self):
+        self.logged_out = True
+        return {"authenticated": False, "cookie_cache_removed": True,
+                "profile_removed": True}
 
     def list_formats(self, target):
         return {"track_id": target, "title": "测试单曲", "formats": []}
@@ -164,6 +173,74 @@ def test_runtime_download_and_task_snapshots(tmp_path):
         "offset": 0, "limit": 100, "total": 2,
         "has_previous": False, "has_next": False,
     }
+
+
+def test_runtime_login_is_cancellable_and_reports_progress(tmp_path):
+    """登录等待必须可中断、且进度要能到 WebUI。
+
+    WebUI 没有终端，等待期间用户唯一能看到的就是 note；不可中断的话，用户想
+    放弃登录只能等超时。
+    """
+    facade = FakeFacade()
+    runtime = WebRuntime(_settings(tmp_path), facade=facade,
+                         persist_settings=False)
+
+    started = runtime.start_login()
+    finished = runtime.wait()
+
+    assert started["cancellable"] is True
+    assert finished["status"] == "succeeded"
+    assert facade.login_wait["cancel"] is not None
+    assert facade.login_wait["notify"] is not None
+    assert "已打开浏览器，请完成登录。" in [
+        note["message"] for note in finished["notes"]
+    ]
+
+
+def test_runtime_switch_account_login_requests_reset(tmp_path):
+    """换账号必须带 reset：否则 Profile 里的旧 token 会让登录秒判成功。"""
+    facade = FakeFacade()
+    runtime = WebRuntime(_settings(tmp_path), facade=facade,
+                         persist_settings=False)
+
+    started = runtime.start_login(switch_account=True)
+    finished = runtime.wait()
+
+    assert started["label"] == "换账号登录"
+    assert facade.login_wait["reset"] is True
+    assert finished["result"]["switch_account"] is True
+
+
+def test_runtime_plain_login_does_not_reset(tmp_path):
+    facade = FakeFacade()
+    runtime = WebRuntime(_settings(tmp_path), facade=facade,
+                         persist_settings=False)
+
+    runtime.start_login()
+    runtime.wait()
+
+    assert facade.login_wait["reset"] is False
+
+
+def test_runtime_logout_returns_refreshed_login_status(tmp_path):
+    facade = FakeFacade()
+    runtime = WebRuntime(replace(_settings(tmp_path), source_backend="pc"),
+                         facade=facade, persist_settings=False)
+
+    result = runtime.logout()
+
+    assert facade.logged_out is True
+    assert result["detail"]["profile_removed"] is True
+    assert result["login"]["authenticated"] is False
+
+
+def test_runtime_refuses_logout_while_operation_runs(tmp_path):
+    runtime = WebRuntime(_settings(tmp_path), facade=FakeFacade(),
+                         persist_settings=False)
+    runtime._operation = {"status": "running", "label": "恢复全部"}
+
+    with pytest.raises(OperationBusyError, match="正在运行"):
+        runtime.logout()
 
 
 def test_runtime_filters_and_pages_task_snapshots(tmp_path):

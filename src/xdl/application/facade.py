@@ -52,9 +52,32 @@ class Facade:
             max_duration=s.risk_poll_max_duration,
         )
 
-    def login(self) -> str:
-        """打开浏览器登录并保存会话，返回保存路径。"""
-        return self._source.interactive_login()
+    def login(self, *, reset: bool = False, cancel=None, notify=None) -> str:
+        """打开浏览器登录并保存会话，返回保存路径。
+
+        `cancel`/`notify` 让无终端的前端（WebUI）也能等待并中断这段交互；
+        不传就是 CLI 的老行为（打印到 stdout、不可中断）。
+        `reset=True` 表示换账号：先清掉现有登录凭据再登录。
+        """
+        return self._source.interactive_login(
+            reset=reset, cancel=cancel, notify=notify)
+
+    def auth_status(self) -> dict:
+        """当前音源的登录态；音源未实现时按“未登录”回报。"""
+        method = getattr(self._source, "auth_status", None)
+        if method is None:
+            return {"backend": self._settings.source_backend,
+                    "authenticated": False, "multi_step": False}
+        return method()
+
+    def logout(self) -> dict:
+        method = getattr(self._source, "logout", None)
+        if method is None:
+            raise XdlError("当前音源不支持独立登出。")
+        # 后端的 logout 会回报清掉了哪些凭据（Cookie 缓存 / Profile），一并带
+        # 出去，前端才能说清“到底删了什么”。
+        detail = method() or {}
+        return {**self.auth_status(), **detail}
 
     def download_track(self, target: str, quality: str | None = None,
                        reporter=None, cancel: threading.Event | None = None) -> str:

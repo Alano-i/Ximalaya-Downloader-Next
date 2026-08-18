@@ -35,7 +35,8 @@ from ..errors import (ApiError, AuthError, ConfigError, DecodeError,
 from ..risk import RiskEventRecorder
 from .decoder import WinEcbDecoder
 from .sign.py_sign import PySignProvider
-from .sign.cookies import (build_cookie_header, extract_cookies_from_profile,
+from .sign.cookies import (build_cookie_header, clear_cookie_cache,
+                           extract_cookies_from_profile,
                            ensure_pc_device_cookies, is_login_cookie,
                            load_cached_cookies, save_cookies)
 
@@ -511,13 +512,16 @@ class PcHttpSource:
         )
 
     # ---- 与音源后端无关的命令（委托给 ChromeSource 兜底） ----
-    def interactive_login(self) -> str:
+    def interactive_login(self, **wait_options) -> str:
         """打开浏览器完成登录并保存到专用 Profile（共用 `xdl login` 流程）。"""
         if self._chrome_fallback is None:
             raise ConfigError(
                 "未配置 chrome_fallback；无法在 pc 后端下交互登录。"
                 "请确认装配根注入了 ChromeSource（见 composition.build_facade）。")
-        path = self._chrome_fallback.interactive_login()
+        if wait_options.pop("reset", False):
+            # 换账号：Cookie 缓存和 Profile 一起清，只清一个都会被旧账号顶回来
+            self.logout()
+        path = self._chrome_fallback.interactive_login(**wait_options)
         take_cookies = getattr(self._chrome_fallback, "take_login_cookies", None)
         if not callable(take_cookies):
             raise ConfigError(
@@ -537,6 +541,21 @@ class PcHttpSource:
         self._authenticated = True
         return path
 
+    def logout(self) -> dict:
+        """清掉本地登录凭据：Cookie 缓存 + 专用 Profile + 内存副本。
+
+        三处缺一不可——只删缓存文件，下次 open() 会从 Profile 重新导出同一个
+        账号；只删 Profile，内存里的 Cookie 头还在本进程里继续用。
+        """
+        removed_cache = clear_cookie_cache(self._cookies_cache_path)
+        profile = ({} if self._chrome_fallback is None
+                   else self._chrome_fallback.logout())
+        self._cookies = []
+        self._cookie_header = ""
+        self._authenticated = False
+        return {"cookie_cache_removed": removed_cache,
+                "cookie_cache_path": self._cookies_cache_path, **profile}
+
     async def inspect_storage(self) -> dict:
         """诊断：列出 Profile 设备标识存储 key（不读 value），委托 ChromeSource。"""
         if self._chrome_fallback is None:
@@ -555,13 +574,18 @@ class PcHttpSource:
                 elapsed_ms=round((time.perf_counter() - started) * 1000),
                 outcome=outcome,
                 ret=ret,
-                message=str(msg or ""),
+                msg=str(msg or ""),
                 in_flight=1,
                 started_at=datetime.now(timezone.utc).isoformat(),
                 request_index=request_index,
                 session_id=self._session_id,
+                authenticated=self._authenticated,
+                backend="pc",
             )
-        except Exception:
+        # 只吞写盘失败。这里原本 catch Exception 并且传的是 `message=`（record()
+        # 的参数叫 msg），于是每次调用都抛 TypeError 被静默吃掉——PC 后端从头到尾
+        # 一条观测都没落盘。catch 收窄后，同类签名错误会立刻炸出来而不是装作没事。
+        except OSError:
             pass
 
     def _record_album(self, album_id: str, outcome: str, ret, msg) -> None:
@@ -573,11 +597,13 @@ class PcHttpSource:
                 elapsed_ms=0,
                 outcome=outcome,
                 ret=ret,
-                message=str(msg or ""),
+                msg=str(msg or ""),
                 in_flight=1,
                 started_at=datetime.now(timezone.utc).isoformat(),
                 request_index=self._request_index,
                 session_id=self._session_id,
+                authenticated=self._authenticated,
+                backend="pc",
             )
-        except Exception:
+        except OSError:
             pass

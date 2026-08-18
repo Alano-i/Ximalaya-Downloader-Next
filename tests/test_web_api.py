@@ -101,6 +101,15 @@ class FakeRuntime:
         self.calls.append(("settings", changes))
         return changes
 
+    def login_status(self):
+        self.calls.append(("login_status",))
+        return {"authenticated": False, "browser_name": "Chrome"}
+
+    def logout(self):
+        self.calls.append(("logout",))
+        return {"detail": {"profile_removed": True},
+                "login": {"authenticated": False, "browser_name": "Chrome"}}
+
     def open_downloads(self, task_id=None):
         return {"path": "/tmp/downloads", "task_id": task_id}
 
@@ -137,6 +146,8 @@ def test_webui_static_shell_is_served():
     assert 'name="experiment_require_identity_change"' in page.text
     assert 'name="experiment_rebirth_rounds"' in page.text
     assert 'id="task-pagination"' in page.text
+    assert 'id="login-entry-button"' in page.text
+    assert 'id="logout-button"' in page.text
     assert "window.setInterval(refreshRuntime, 850)" not in script.text
     assert "document.hidden" in script.text
     assert "javascript" in script.headers["content-type"]
@@ -226,6 +237,20 @@ def test_web_api_accepts_pc_source_backend():
 
     assert response.status_code == 200
     assert response.json()["settings"]["source_backend"] == "pc"
+    # 换后端/换浏览器要顺带回传新登录态，否则前端会继续显示上一套凭据的状态
+    assert response.json()["login"] == {"authenticated": False,
+                                        "browser_name": "Chrome"}
+
+
+def test_web_api_logout_clears_credentials_for_any_backend():
+    runtime = FakeRuntime()
+    with TestClient(create_app(runtime)) as client:
+        response = client.post("/api/auth/logout")
+
+    assert response.status_code == 200
+    assert response.json()["login"]["authenticated"] is False
+    assert response.json()["detail"]["profile_removed"] is True
+    assert ("logout",) in runtime.calls
 
 
 def test_web_api_rejects_unknown_source_backend():

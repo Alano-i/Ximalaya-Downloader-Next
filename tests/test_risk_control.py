@@ -3,16 +3,19 @@ import asyncio
 import builtins
 import json
 import sqlite3
+import time
 
 import pytest
 
 from xdl.adapters.source_chrome import (ChromeSource, _has_login_cookie,
                                         _is_captcha_url, _parse_base_info_payload,
-                                        _is_device_fingerprint_cookie)
+                                        _is_device_fingerprint_cookie,
+                                        wipe_browser_profile)
 from xdl.application.usecases import (DownloadTrackUseCase, DownloadAlbumUseCase,
                                       RetryPolicy)
 from xdl.domain import Album, AlbumTrack, Quality
-from xdl.errors import ApiError, AuthError, RiskControlError
+from xdl.errors import (ApiError, AuthError, CancelledByUser, ConfigError,
+                        RiskControlError)
 from xdl.frontends.cli import _print_album_result
 from xdl.risk import RiskEventRecorder, summarize_risk_events
 from xdl.settings import Settings
@@ -74,6 +77,31 @@ def _patch_login_playwright(monkeypatch, cookies, pages=()):
 
     monkeypatch.setattr(sync_api, "sync_playwright", lambda: _Manager())
     return browser
+
+
+class _LiveProcess:
+    """仍在运行的浏览器进程替身：poll() 返回 None 表示没退出。"""
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
+
+
+def _await_login(source, *, cancel=None, expired=False):
+    """按新签名调用轮询等待；expired=True 表示 deadline 已过（立即判超时）。"""
+    return source._await_interactive_login(
+        _LiveProcess(), cancel=cancel, announce=lambda _msg: None,
+        deadline=time.monotonic() + (-1 if expired else 60),
+        poll_interval=0,
+    )
 
 
 @pytest.mark.parametrize("ret,msg", [
@@ -484,8 +512,9 @@ def test_login_verification_rejects_dom_only_state(monkeypatch):
     browser = _patch_login_playwright(monkeypatch, [], pages=[_Page()])
     source = ChromeSource(_Decoder(), "chrome", "profile")
 
-    assert source._verify_interactive_login() is False
+    assert _await_login(source, expired=True) is False
     assert browser.closed is False
+    assert browser.root_cdp_commands == []
 
 
 def test_login_verification_never_resets_profile_state(monkeypatch):
@@ -508,7 +537,7 @@ def test_login_verification_never_resets_profile_state(monkeypatch):
     monkeypatch.setattr(source, "_reset_device_cookies_sync",
                         lambda _context: reset_calls.append(True))
 
-    assert source._verify_interactive_login() is True
+    assert _await_login(source) is True
     assert browser.root_cdp_commands == ["Browser.close"]
     assert browser.closed is False
     assert reset_calls == []
@@ -522,54 +551,174 @@ def test_device_fingerprint_reset_is_disabled_by_default():
     assert Settings().reset_device_fingerprint is False
 
 
-def test_interactive_login_reprompts_until_verified(tmp_path, monkeypatch):
+def _stub_login_launch(monkeypatch, launched=None):
+    """让 interactive_login 走到等待阶段：假进程 + 调试端口先关后开。"""
+    port_states = iter([False, True])
+
+    def fake_popen(args, **_kwargs):
+        if launched is not None:
+            launched["args"] = args
+        return _LiveProcess()
+
+    monkeypatch.setattr("xdl.adapters.source_chrome.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("xdl.adapters.source_chrome._port_alive",
+                        lambda _port: next(port_states))
+    monkeypatch.setattr("xdl.adapters.source_chrome.time.sleep", lambda _s: None)
+
+
+def _forbid_stdin(monkeypatch):
+    """登录路径一旦回头读 stdin 就直接失败。
+
+    这是回归闸门：WebUI 的服务进程没有 tty，`input()` 会立刻抛 EOFError，
+    finally 随之杀掉浏览器——用户看到的就是"窗口一闪就关"。
+    """
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("登录流程不得读取 stdin")
+
+    monkeypatch.setattr(builtins, "input", _boom)
+
+
+def test_interactive_login_polls_until_token_appears(tmp_path, monkeypatch):
+    """轮询 CDP 直到出现登录 token，全程不碰终端。"""
+    import playwright.sync_api as sync_api
+
     chrome = tmp_path / "chrome.exe"
     chrome.write_bytes(b"")
     source = ChromeSource(_Decoder(), str(chrome), str(tmp_path / "profile"))
     launched = {}
-    prompts = []
-    verifications = iter([False, True])
-    port_states = iter([False, True])
+    polls = {"count": 0}
+    commands = []
 
-    class FakeProcess:
-        def terminate(self):
-            pass
+    class _Context:
+        def cookies(self, *_urls):
+            polls["count"] += 1
+            if polls["count"] < 3:      # 前两轮用户还没登录完
+                return []
+            return [{"name": "1&_token", "value": "present",
+                     "domain": ".ximalaya.com", "path": "/"}]
 
-        def wait(self, timeout=None):
-            return 0
+    class _Browser:
+        contexts = [_Context()]
 
-        def kill(self):
-            pass
+        def new_browser_cdp_session(self):
+            class _RootSession:
+                def send(self, method):
+                    commands.append(method)
+            return _RootSession()
 
-    def fake_popen(args, **kwargs):
-        launched["args"] = args
-        return FakeProcess()
+    class _Manager:
+        def __enter__(self):
+            class _Playwright:
+                class chromium:
+                    @staticmethod
+                    def connect_over_cdp(_url):
+                        return _Browser()
+            return _Playwright()
 
-    def fake_input(prompt):
-        prompts.append(prompt)
-        return ""
+        def __exit__(self, *_args):
+            return False
 
-    monkeypatch.setattr("xdl.adapters.source_chrome.subprocess.Popen", fake_popen)
-    monkeypatch.setattr(
-        "xdl.adapters.source_chrome._port_alive",
-        lambda _port: next(port_states),
-    )
-    monkeypatch.setattr(builtins, "input", fake_input)
-    monkeypatch.setattr(
-        source, "_verify_interactive_login",
-        lambda: next(verifications), raising=False,
-    )
+    monkeypatch.setattr(sync_api, "sync_playwright", lambda: _Manager())
+    _stub_login_launch(monkeypatch, launched)
+    _forbid_stdin(monkeypatch)
     monkeypatch.setattr(
         "xdl.adapters.source_chrome._has_persisted_login_cookie",
         lambda _profile_dir: True, raising=False,
     )
 
-    assert source.interactive_login() == str(tmp_path / "profile")
-    assert len(prompts) == 2
+    path = source.interactive_login(wait_timeout=60)
+
+    assert path == str(tmp_path / "profile")
+    assert polls["count"] == 3            # 轮询到第三轮才拿到 token
+    assert commands == ["Browser.close"]  # 成功后走 Chrome 自身的正常退出
     assert "--remote-debugging-port=9222" in launched["args"]
-    assert _has_login_cookie([
-        {"name": "1&_token", "value": ""},
-    ]) is False
+
+
+def test_interactive_login_reset_wipes_profile_before_waiting(tmp_path, monkeypatch):
+    """换账号：必须先清 Profile，再等新登录。
+
+    不清的话，Profile 里旧账号的 token 会让第一轮轮询立刻命中——浏览器一闪即
+    关，存下来的还是同一个账号，用户就"换不了号"。
+    """
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"")
+    profile = tmp_path / "profile"
+    (profile / "Default").mkdir(parents=True)
+    (profile / "Local State").write_text("{}", encoding="utf-8")
+    source = ChromeSource(_Decoder(), str(chrome), str(profile))
+    wiped_before_launch = {}
+
+    _patch_login_playwright(monkeypatch, [])
+    _forbid_stdin(monkeypatch)
+    port_states = iter([False, False, True])
+    monkeypatch.setattr("xdl.adapters.source_chrome._port_alive",
+                        lambda _port: next(port_states))
+    monkeypatch.setattr("xdl.adapters.source_chrome.time.sleep", lambda _s: None)
+
+    def fake_popen(_args, **_kwargs):
+        # 浏览器启动时 Profile 必须已经是空的（目录会被重新创建，看内容）
+        wiped_before_launch["empty"] = not any(profile.iterdir())
+        return _LiveProcess()
+
+    monkeypatch.setattr("xdl.adapters.source_chrome.subprocess.Popen", fake_popen)
+
+    # 清完 Profile 后没人登录 → 应超时报错，而不是"秒成功"
+    with pytest.raises(AuthError, match="等待登录超时"):
+        source.interactive_login(reset=True, wait_timeout=0)
+
+    assert wiped_before_launch["empty"] is True
+    assert not (profile / "Local State").exists()
+
+
+def test_interactive_login_without_reset_warns_about_existing_session(tmp_path,
+                                                                     monkeypatch):
+    """不换号时至少要说清"复用了已有登录态"，不能让用户以为登了新账号。"""
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"")
+    profile = tmp_path / "profile"
+    (profile / "Default").mkdir(parents=True)
+    source = ChromeSource(_Decoder(), str(chrome), str(profile))
+    notes = []
+
+    _patch_login_playwright(monkeypatch, [])
+    _stub_login_launch(monkeypatch)
+    _forbid_stdin(monkeypatch)
+    monkeypatch.setattr(
+        "xdl.adapters.source_chrome._has_persisted_login_cookie",
+        lambda _profile_dir: True, raising=False,
+    )
+
+    with pytest.raises(AuthError, match="等待登录超时"):
+        source.interactive_login(notify=notes.append, wait_timeout=0)
+
+    assert any("已有登录态" in note for note in notes)
+    assert profile.exists()      # 没要求换号就绝不能删 Profile
+
+
+def test_interactive_login_stops_when_cancelled(tmp_path, monkeypatch):
+    """WebUI 的"优雅停止"要能中断等待，而不是干等到超时。"""
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"")
+    source = ChromeSource(_Decoder(), str(chrome), str(tmp_path / "profile"))
+    _patch_login_playwright(monkeypatch, [])
+    _stub_login_launch(monkeypatch)
+    _forbid_stdin(monkeypatch)
+
+    with pytest.raises(CancelledByUser):
+        source.interactive_login(cancel=lambda: True, wait_timeout=60)
+
+
+def test_interactive_login_times_out_without_login(tmp_path, monkeypatch):
+    """等不到登录要报超时，而不是悄悄返回一个"成功"的 Profile 路径。"""
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"")
+    source = ChromeSource(_Decoder(), str(chrome), str(tmp_path / "profile"))
+    _patch_login_playwright(monkeypatch, [])
+    _stub_login_launch(monkeypatch)
+    _forbid_stdin(monkeypatch)
+
+    with pytest.raises(AuthError, match="等待登录超时"):
+        source.interactive_login(wait_timeout=0)
 
 
 def test_interactive_login_rejects_unpersisted_token(tmp_path, monkeypatch):
@@ -577,24 +726,10 @@ def test_interactive_login_rejects_unpersisted_token(tmp_path, monkeypatch):
     chrome.write_bytes(b"")
     source = ChromeSource(_Decoder(), str(chrome), str(tmp_path / "profile"))
 
-    class _Process:
-        def terminate(self):
-            pass
-
-        def wait(self, timeout=None):
-            return 0
-
-        def kill(self):
-            pass
-
-    port_states = iter([False, True])
-    monkeypatch.setattr("xdl.adapters.source_chrome.subprocess.Popen",
-                        lambda *a, **kw: _Process())
-    monkeypatch.setattr("xdl.adapters.source_chrome._port_alive",
-                        lambda _port: next(port_states))
-    monkeypatch.setattr(builtins, "input", lambda _prompt: "")
-    monkeypatch.setattr(source, "_verify_interactive_login",
-                        lambda: True, raising=False)
+    _stub_login_launch(monkeypatch)
+    _forbid_stdin(monkeypatch)
+    monkeypatch.setattr(source, "_await_interactive_login",
+                        lambda *a, **kw: True, raising=False)
     monkeypatch.setattr(
         "xdl.adapters.source_chrome._has_persisted_login_cookie",
         lambda _profile_dir: False, raising=False,
@@ -602,6 +737,46 @@ def test_interactive_login_rejects_unpersisted_token(tmp_path, monkeypatch):
 
     with pytest.raises(AuthError, match="未持久化"):
         source.interactive_login()
+
+
+def test_logout_wipes_dedicated_profile(tmp_path, monkeypatch):
+    """登出必须删 Profile：只清 Cookie 缓存的话浏览器会自动登回旧账号。"""
+    profile = tmp_path / "profile"
+    (profile / "Default").mkdir(parents=True)
+    (profile / "Local State").write_text("{}", encoding="utf-8")
+    source = ChromeSource(_Decoder(), "chrome", str(profile))
+    monkeypatch.setattr("xdl.adapters.source_chrome._port_alive",
+                        lambda _port: False)
+
+    result = source.logout()
+
+    assert result["profile_removed"] is True
+    assert not profile.exists()
+
+
+def test_logout_refuses_when_browser_still_running(tmp_path, monkeypatch):
+    """浏览器还开着就删 Profile，退出时会把旧登录态重新写回来。"""
+    profile = tmp_path / "profile"
+    (profile / "Default").mkdir(parents=True)
+    source = ChromeSource(_Decoder(), "chrome", str(profile))
+    monkeypatch.setattr("xdl.adapters.source_chrome._port_alive",
+                        lambda _port: True)
+
+    with pytest.raises(ConfigError, match="仍被占用"):
+        source.logout()
+    assert profile.exists()
+
+
+def test_profile_wipe_refuses_paths_that_are_not_browser_profiles(tmp_path):
+    """闸门：chrome_profile_dir 被误配时，绝不能递归删掉用户的真实目录。"""
+    victim = tmp_path / "documents"
+    (victim / "important").mkdir(parents=True)
+
+    with pytest.raises(ConfigError, match="不是浏览器专用 Profile"):
+        wipe_browser_profile(str(victim))
+    assert (victim / "important").exists()
+    # 目录不存在时是无操作，不是报错
+    assert wipe_browser_profile(str(tmp_path / "missing")) is False
 
 
 class _RiskSource:

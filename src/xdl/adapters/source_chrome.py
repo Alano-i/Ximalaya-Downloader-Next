@@ -36,8 +36,8 @@ import requests
 
 from ..config import platform
 from ..domain import Track, PlayUrl, Album, AlbumTrack
-from ..errors import (XdlError, ApiError, AuthError, NetworkError, ConfigError,
-                      RiskControlError)
+from ..errors import (XdlError, ApiError, AuthError, CancelledByUser,
+                      NetworkError, ConfigError, RiskControlError)
 from ..ports import Decoder
 from ..risk import RiskEventRecorder
 from .sign.cookies import (
@@ -55,6 +55,45 @@ def _port_alive(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _cancel_requested(cancel) -> bool:
+    """`cancel` 可能是 threading.Event（Web 运行器）或普通可调用对象（CLI）。"""
+    if cancel is None:
+        return False
+    is_set = getattr(cancel, "is_set", None)
+    if callable(is_set):
+        return bool(is_set())
+    return bool(cancel())
+
+
+def wipe_browser_profile(profile_dir: str) -> bool:
+    """删除专用浏览器 Profile 目录；删掉了返回 True。
+
+    这是"登出"的关键一步：只清 Cookie 缓存文件是不够的，Profile 里还留着上一
+    个账号的会话，下次打开浏览器会直接自动登录回去，根本换不了号。
+
+    只删 xdl 自己创建的专用 Profile，所以先要求目录里存在 Chrome user-data-dir
+    的标志物（`Local State` 或 `Default/`）。少了这道闸，一旦 chrome_profile_dir
+    被误配成家目录之类的路径，这里就会递归删掉用户的真实数据。
+    """
+    import shutil
+
+    path = Path(profile_dir or "")
+    if not profile_dir or not path.is_dir():
+        return False
+    resolved = path.resolve()
+    if resolved.parent == resolved:      # 文件系统根
+        raise ConfigError(f"拒绝删除根目录级 Profile 路径: {resolved}")
+    markers = ((resolved / "Local State").exists(),
+               (resolved / "Default").is_dir())
+    if not any(markers):
+        raise ConfigError(
+            f"{resolved} 看起来不是浏览器专用 Profile（缺少 Local State / Default），"
+            "为避免误删已跳过；请检查 chrome_profile_dir 配置。"
+        )
+    shutil.rmtree(resolved)
+    return True
 
 
 def _has_login_cookie(cookies: list[dict]) -> bool:
@@ -662,16 +701,40 @@ class ChromeSource:
                      total=total or len(tracks), tracks=tracks)
 
     # ---- 适配器特有：交互式登录（同步，一次性） ----
-    def interactive_login(self) -> str:
+    def interactive_login(self, *, reset: bool = False, cancel=None,
+                          notify=None, wait_timeout: float = 600.0) -> str:
+        """打开专用浏览器等待用户登录，检测到登录 token 后自动收尾。
+
+        等待方式是**轮询 CDP**，不是读终端。原来这里 `input()` 等回车，在 WebUI
+        下是致命的：服务进程没有 tty，`input()` 立刻抛 EOFError，finally 随即
+        终止浏览器——用户看到的就是"窗口一闪就关"。轮询让 CLI 与 WebUI 共用一
+        条路径，用户也不必再切回终端按回车。
+
+        `reset=True` 是"换账号"：先清掉专用 Profile 再开浏览器。不清的话，
+        Profile 里旧账号的 token 会让第一轮轮询立刻命中，浏览器一闪即关，
+        保存下来的还是同一个账号——换号根本换不掉。
+        """
+        announce = notify or print
         self._login_cookies = []
         self._require_chrome()
+        if reset:
+            detail = self.logout()
+            if detail.get("profile_removed"):
+                announce(f"已清除专用 {self._browser_name} Profile 中的旧登录态。")
+        elif _has_persisted_login_cookie(self._profile_dir):
+            # 不吭声地"复用"会被误认为登录成功，而用户其实是想换号
+            announce(
+                f"专用 {self._browser_name} Profile 中已有登录态，将直接复用；"
+                "要换成另一个账号，请使用“换账号”。"
+            )
         os.makedirs(self._profile_dir, exist_ok=True)
         if _port_alive(self._port):
             raise NetworkError(
                 f"{self._browser_name} 调试端口 {self._port} 已被占用，"
                 "请先关闭占用该端口的浏览器。"
             )
-        print(f"即将打开 {self._browser_name}，请在其中完成登录（扫码或账号密码）。")
+        announce(f"已打开 {self._browser_name}，请在其中完成登录（扫码或账号密码）；"
+                 "检测到登录态后浏览器会自动关闭。")
         args = [self._chrome_path,
                 f"--remote-debugging-port={self._port}",
                 f"--user-data-dir={self._profile_dir}",
@@ -689,12 +752,15 @@ class ChromeSource:
                 raise NetworkError(
                     f"{self._browser_name} 调试端口 {self._port} 未就绪（启动超时）。")
 
-            while not verified:
-                input(">>> 登录完成后回到这里按回车，程序将验证登录状态: ")
-                verified = self._verify_interactive_login()
-                if not verified:
-                    print(f"未检测到专用 {self._browser_name} 的登录状态，"
-                          "请在该窗口继续登录后重试。")
+            verified = self._await_interactive_login(
+                proc, cancel=cancel, announce=announce,
+                deadline=time.monotonic() + max(10.0, float(wait_timeout)),
+            )
+            if not verified:
+                raise AuthError(
+                    f"等待登录超时（{int(wait_timeout)} 秒），未在专用 "
+                    f"{self._browser_name} 中检测到登录态；请重试。"
+                )
         finally:
             # 验证成功时 _verify_interactive_login 已通过 CDP 正常关闭浏览器，
             # 只等待其退出，异常/中断时才使用终止作为兜底。
@@ -723,31 +789,66 @@ class ChromeSource:
         cookies, self._login_cookies = self._login_cookies, []
         return [dict(cookie) for cookie in cookies]
 
-    def _verify_interactive_login(self) -> bool:
-        """连接专用 Chrome 验证登录；成功后正常关闭浏览器以确保 Profile 刷盘。"""
+    def logout(self) -> dict:
+        """登出＝删掉专用 Profile。平台侧没有可调的登出接口，本地凭据即登录态。"""
+        if _port_alive(self._port):
+            raise ConfigError(
+                f"{self._browser_name} 调试端口 {self._port} 仍被占用；"
+                "请先关闭该浏览器窗口再登出，否则 Profile 会被重新写回。"
+            )
+        removed = wipe_browser_profile(self._profile_dir)
+        self._login_cookies = []
+        self._authenticated = None
+        return {"profile_removed": removed, "profile_dir": self._profile_dir}
+
+    def _await_interactive_login(self, proc, *, cancel, announce, deadline,
+                                 poll_interval: float = 1.5) -> bool:
+        """轮询专用浏览器直到出现登录 token；成功后正常关闭浏览器以确保刷盘。
+
+        全程只保持一条 CDP 连接：每轮重连会拖慢轮询，也更容易撞上 Chrome 的
+        调试端口限流。
+        """
         from playwright.sync_api import sync_playwright
 
+        self._login_cookies = []
+        reminded = False
         with sync_playwright() as pw:
             browser = pw.chromium.connect_over_cdp(
                 f"http://127.0.0.1:{self._port}")
-            contexts = browser.contexts
-            if not contexts:
-                return False
-            context = contexts[0]
-            site_cookies = filter_cookies_for_domain(
-                context.cookies(), platform.BASE,
-            )
-            authenticated = _has_login_cookie(site_cookies)
-            if authenticated:
-                # connect_over_cdp() 取得的是远程 Chrome 连接；browser.close()
-                # 只会关闭 Playwright 连接，不能让由 interactive_login 启动的
-                # Chrome 进程退出。通过根 CDP 会话发送 Browser.close，才会走
-                # Chrome 自身的正常退出/落盘流程。
-                browser.new_browser_cdp_session().send("Browser.close")
-                self._login_cookies = [dict(cookie) for cookie in site_cookies]
-            else:
-                self._login_cookies = []
-            return authenticated
+            while True:
+                if _cancel_requested(cancel):
+                    raise CancelledByUser("登录已取消。")
+                if proc.poll() is not None:
+                    # 用户自己把窗口关了：继续轮询只会空转到超时
+                    raise AuthError(
+                        f"{self._browser_name} 已关闭，登录未完成。"
+                    )
+                try:
+                    contexts = browser.contexts
+                    site_cookies = filter_cookies_for_domain(
+                        contexts[0].cookies(), platform.BASE,
+                    ) if contexts else []
+                except Exception as exc:
+                    raise AuthError(
+                        f"与专用 {self._browser_name} 的调试连接已断开，"
+                        f"登录未完成：{exc}"
+                    ) from exc
+                if _has_login_cookie(site_cookies):
+                    # connect_over_cdp() 取得的是远程 Chrome 连接；browser.close()
+                    # 只会关闭 Playwright 连接，不能让由 interactive_login 启动的
+                    # Chrome 进程退出。通过根 CDP 会话发送 Browser.close，才会走
+                    # Chrome 自身的正常退出/落盘流程。
+                    self._login_cookies = [dict(cookie) for cookie in site_cookies]
+                    browser.new_browser_cdp_session().send("Browser.close")
+                    announce("已检测到登录态，正在关闭浏览器并保存凭据…")
+                    return True
+                if time.monotonic() > deadline:
+                    return False
+                if not reminded and time.monotonic() > deadline - 540:
+                    announce(f"仍在等待登录…请在打开的 {self._browser_name} 窗口中"
+                             "完成登录，完成后无需回到这里操作。")
+                    reminded = True
+                time.sleep(poll_interval)
 
     @staticmethod
     def _terminate_process(proc) -> None:
@@ -1056,6 +1157,7 @@ class ChromeSource:
                 request_index=request_index,
                 started_at=started_at,
                 authenticated=self._authenticated,
+                backend="chrome",
                 device_fingerprint_reset=self._device_fingerprint_was_reset,
             )
         except OSError:

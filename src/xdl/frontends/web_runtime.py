@@ -123,11 +123,19 @@ class WebRuntime:
     def settings(self) -> Settings:
         return self._settings
 
+    def login_status(self) -> dict:
+        """当前后端的登录态。
+
+        换后端可能等于换了一套登录态，所以这里单独成一个查询：改设置之后调用方
+        必须重新问一次，不能沿用 bootstrap 时的快照。
+        """
+        return login_cache_status(self._settings)
+
     def bootstrap(self) -> dict:
         tasks = self.tasks_snapshot()
         return {
             "settings": settings_dict(self._settings),
-            "login": login_cache_status(self._settings),
+            "login": self.login_status(),
             "operation": self.operation_snapshot(include_result=False),
             "tasks": tasks["tasks"],
             "counts": tasks["counts"],
@@ -217,12 +225,27 @@ class WebRuntime:
             "summary": summarize_risk_events(self._settings.risk_log_path),
         }
 
-    def start_login(self) -> dict:
-        def run(reporter, _cancel):
-            reporter.note("正在打开浏览器，请在浏览器中完成登录。")
-            path = self._facade.login()
-            return {"profile_path": path}
-        return self._start("login", "登录", False, run)
+    def start_login(self, *, switch_account: bool = False) -> dict:
+        def run(reporter, cancel):
+            reporter.note("正在清除旧登录态并打开浏览器…" if switch_account
+                          else "正在打开浏览器，请在浏览器中完成登录。")
+            # notify 走 reporter：登录等待的进度只有这条通道能到 WebUI。
+            # cancel 让"优雅停止"能中断等待，所以这个操作是 cancellable 的。
+            path = self._facade.login(reset=switch_account, cancel=cancel,
+                                      notify=reporter.note)
+            return {"profile_path": path, "switch_account": switch_account}
+        return self._start("login", "换账号登录" if switch_account else "登录",
+                           True, run)
+
+    def logout(self) -> dict:
+        """清除当前后端的登录态；返回清理明细 + 刷新后的登录态。"""
+        with self._lock:
+            if self._operation and self._operation["status"] == "running":
+                raise OperationBusyError(
+                    f"“{self._operation['label']}”正在运行，请先等待或停止再登出。"
+                )
+            detail = self._facade.logout()
+        return {"detail": detail, "login": self.login_status()}
 
     def start_download(self, *, mode: str, target: str,
                        quality: str | None = None,

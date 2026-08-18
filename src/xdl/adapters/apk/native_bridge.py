@@ -10,14 +10,26 @@ from pathlib import Path
 from typing import Any
 
 from ...errors import ConfigError, SignError
+from . import native_py
 
 
 class ApkNativeBridge:
+    """native 能力入口。
+
+    默认全部走 ``native_py`` 的纯 Python 实现，**不会启动 Java sidecar**：
+    XUID、ticket、登录签名、手机号加密与 downloadEncryptVersion 0/1/2 的地址解密
+    均不再依赖 Java 与 `.so`。
+
+    ``prefer_python=False`` 可强制全部走 sidecar，供差分测试比对使用。
+    """
+
     def __init__(self, *, java_path: str, signer_jar: str, libcxx: str,
                  login_so: str, xuid_so: str, encrypt_so: str,
                  asset_dir: str,
-                 timeout: float = 30.0):
+                 timeout: float = 30.0,
+                 prefer_python: bool = True):
         self.asset_dir = asset_dir
+        self.prefer_python = prefer_python
         self.command = [java_path or "java", f"-Dxmly.asset.dir={asset_dir}",
                         "-jar", signer_jar, libcxx,
                         login_so, xuid_so, encrypt_so]
@@ -157,16 +169,30 @@ class ApkNativeBridge:
             raise SignError("APK native 调用失败。")
 
     def encrypt_mobile(self, mobile: str) -> str:
+        if self.prefer_python:
+            return native_py.encrypt_mobile(mobile)
         return str(self.call("encryptMobile", mobile=mobile))
 
     def sign(self, values: dict[str, str]) -> str:
+        if self.prefer_python:
+            return native_py.sign(values, production=True)
         return str(self.call("sign", values=values, production=True))
 
     def create_xuid(self, stable_id: str) -> str:
+        if self.prefer_python:
+            return native_py.create_xuid(stable_id)
         return str(self.call("createXuid", stableId=stable_id))
 
     def ticket(self, attr: str, xuid: str) -> str:
+        if self.prefer_python:
+            return native_py.ticket(attr, xuid)
         return str(self.call("ticket", attr=attr, xuid=xuid))
 
     def decrypt_download(self, value: str, version: int) -> str:
+        if self.prefer_python and native_py.supports_decrypt(version):
+            return native_py.decrypt_download(value, int(version))
         return str(self.call("decryptDownload", value=value, version=int(version)))
+
+    def requires_sidecar(self) -> bool:
+        """当前配置下，是否还有操作需要 Java sidecar。"""
+        return not self.prefer_python

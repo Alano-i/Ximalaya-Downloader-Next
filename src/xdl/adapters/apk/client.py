@@ -80,7 +80,12 @@ class ApkClient:
         }
 
     def open(self) -> None:
-        self.bridge.open()
+        # 不主动启动 sidecar：XUID/ticket/解密走纯 Python，登录相关调用会在
+        # 需要时惰性启动。这样整个下载链路不再依赖 Java。
+        # 未声明该能力的 bridge（含测试替身）保持原有的预启动行为。
+        requires_sidecar = getattr(self.bridge, "requires_sidecar", None)
+        if requires_sidecar is None or requires_sidecar():
+            self.bridge.open()
         if not self.xuid:
             self.xuid = self.bridge.create_xuid(self.device_id)
             self.state.save_xuid(self.xuid)

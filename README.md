@@ -170,7 +170,7 @@ xdl --source-backend apk web
 
 APK 整专下载会先取得授权曲目清单，然后对每一集分别生成 `x-tk`、请求一次最新下载连接并立即下载。连接不会写入 SQLite 或跨集缓存；`.part` 恢复时也会重新获取该集连接。媒体连接返回 `401/403/404` 时会作废旧连接并最多刷新一次。
 
-该后端需要 Java 17+，随附的版本绑定 native bundle 位于 `vendor/apk_protocol/`，启动时会按 `manifest.json` 校验 SHA-256。可以通过 `Settings.apk_*` 字段覆盖 Java、JAR、`.so`、asset 与状态路径。
+该后端**不需要 Java，也不加载任何 `.so`**：XUID、`x-tk`、登录签名、手机号加密与下载地址解密均由 `src/xdl/adapters/apk/native_py.py` 用标准算法实现，常量集中在 `src/xdl/config/apk.py` 供审计（还原过程见 `docs/apk-native-reimplementation.md`）。官方 native 库仅在协议升级时做差分验证才需要，请按 `vendor/apk_protocol/README.md` 自行提取；`Settings.apk_*` 字段可覆盖 Java、JAR、`.so`、asset 与状态路径。
 
 ## 本地数据
 

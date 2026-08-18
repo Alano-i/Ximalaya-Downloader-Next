@@ -75,7 +75,8 @@ def _native_bridge(tmp_path, *, timeout=0.1):
 def test_native_bridge_requires_download_key_asset(tmp_path):
     bridge = _native_bridge(tmp_path)
 
-    with pytest.raises(ConfigError, match=r"drawable/x_m\.png"):
+    # 路径分隔符随平台走（POSIX 是 /，Windows 是 \），断言两种都接受
+    with pytest.raises(ConfigError, match=r"drawable[/\\]x_m\.png"):
         bridge._validate()
 
 
@@ -257,7 +258,11 @@ def test_state_is_isolated_and_persistent(tmp_path):
     assert second.device_id == first.device_id
     assert second.load_auth() == ("100", "secret")
     assert second.load_xuid() == "xuid"
-    assert oct((tmp_path / "apk" / "accounts.json").stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":
+        # POSIX 下私有文件必须是 0600；Windows 的 chmod 不影响 ACL，stat 恒报
+        # 0666，访问控制交给目录/文件 ACL，这里不作断言。
+        assert oct((tmp_path / "apk" / "accounts.json").stat().st_mode
+                   & 0o777) == "0o600"
 
 
 def test_apk_state_migrates_legacy_auth_and_preserves_multiple_accounts(tmp_path):

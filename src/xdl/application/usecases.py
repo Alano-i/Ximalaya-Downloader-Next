@@ -373,10 +373,15 @@ class DownloadAlbumUseCase:
         self._download_dir = download_dir
         # APK 连续失败按专辑集序计数；并发完成顺序不稳定，因此启用该能力时
         # 强制串行。未声明此能力的 WEB/PC/Chrome 保持原并发行为。
-        self._concurrency = (
-            1 if int(getattr(source, "max_consecutive_failures", 0)) > 0
-            else max(1, concurrency)
-        )
+        requested = max(1, concurrency)
+        if int(getattr(source, "max_consecutive_failures", 0)) > 0:
+            self._concurrency = 1
+            # 用户显式给了并发却被改写时必须让其知道——静默降级会让人觉得
+            # "传了 --concurrency 4 怎么没生效"。在 execute 里经 reporter 告知。
+            self._concurrency_overridden = requested if requested > 1 else None
+        else:
+            self._concurrency = requested
+            self._concurrency_overridden = None
         self._retry = retry or RetryPolicy()
         self._store = store
         self._stop_event = stop_event
@@ -390,6 +395,9 @@ class DownloadAlbumUseCase:
         selected = album.select_range(start, end)
 
         result = AlbumResult(album.title, incomplete=not album.is_complete)
+        if self._concurrency_overridden is not None:
+            _note(reporter, f"该音源要求串行下载：并发已从 "
+                            f"{self._concurrency_overridden} 降为 1。")
         if not album.is_complete:
             _note(reporter, f"清单仅取到 {len(album.tracks)}/{album.total} 集"
                             "（未登录或受限）。")

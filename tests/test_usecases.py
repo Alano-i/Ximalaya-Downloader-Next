@@ -216,6 +216,38 @@ def test_apk_consecutive_failure_breaker_forces_serial_order(tmp_path):
     assert uc._concurrency == 1
 
 
+def test_forced_serial_download_is_announced_when_user_asked_for_more(tmp_path):
+    """用户显式传了并发却被强制降为 1 时，必须通过 reporter 告知——不能静默。"""
+    src = FakeSource(_one_track_album())
+    src.max_consecutive_failures = 3
+    notes = []
+
+    class _Reporter:
+        def note(self, msg):
+            notes.append(msg)
+
+    uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path), concurrency=8)
+    run(uc.execute("123", Quality.STANDARD, reporter=_Reporter()))
+
+    assert any("降为 1" in note for note in notes)
+
+
+def test_serial_download_not_announced_when_user_did_not_ask_for_more(tmp_path):
+    """用户没要并发（默认 1）时不该多出一条无谓的提示。"""
+    src = FakeSource(_one_track_album())
+    src.max_consecutive_failures = 3
+    notes = []
+
+    class _Reporter:
+        def note(self, msg):
+            notes.append(msg)
+
+    uc = DownloadAlbumUseCase(src, FakeSink(), str(tmp_path), concurrency=1)
+    run(uc.execute("123", Quality.STANDARD, reporter=_Reporter()))
+
+    assert not any("降为 1" in note for note in notes)
+
+
 def test_apk_success_resets_consecutive_failure_count(tmp_path):
     tracks = [AlbumTrack(str(i), f"第{i}集", i) for i in range(1, 6)]
     album = Album("123", "专辑", total=5, tracks=tracks)

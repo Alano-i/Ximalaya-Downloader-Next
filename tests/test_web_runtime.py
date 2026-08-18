@@ -130,6 +130,20 @@ class FakeFacade:
         return {"authenticated": False, "cookie_cache_removed": True,
                 "profile_removed": True}
 
+    def auth_status(self):
+        return {"backend": "apk", "authenticated": True, "uid": "100",
+                "accounts": [{"uid": "100", "active": True}]}
+
+    def login_password(self, account, password, mode, fds_otp):
+        return {"authenticated": True, "account": account, "password": password,
+                "mode": mode, "fds_otp": fds_otp}
+
+    def switch_account(self, uid):
+        return {"authenticated": True, "uid": uid}
+
+    def delete_account(self, uid):
+        return {"authenticated": False, "uid": "", "deleted": uid}
+
     def list_formats(self, target):
         return {"track_id": target, "title": "测试单曲", "formats": []}
 
@@ -241,6 +255,72 @@ def test_runtime_refuses_logout_while_operation_runs(tmp_path):
 
     with pytest.raises(OperationBusyError, match="正在运行"):
         runtime.logout()
+
+
+def test_runtime_login_status_follows_source_backend(tmp_path):
+    """换后端＝换登录体系：apk 读独立账号库，其余后端读浏览器 Cookie 缓存。
+
+    这两套登录态不能混用——混用的表现就是切到 pc 后头部还写着 APK 已登录。
+    """
+    apk = WebRuntime(replace(_settings(tmp_path), source_backend="apk"),
+                     facade=FakeFacade(), persist_settings=False)
+    browser = WebRuntime(replace(_settings(tmp_path), source_backend="pc"),
+                         facade=FakeFacade(), persist_settings=False)
+
+    apk_login = apk.login_status()
+    browser_login = browser.login_status()
+
+    assert apk_login["browser_name"] == "APK"
+    assert apk_login["authenticated"] is True
+    assert apk_login["accounts"] == [{"uid": "100", "active": True}]
+    # 账号库里有已存账号 → profile_exists 为真
+    assert apk_login["profile_exists"] is True
+    # pc 后端不看 APK 账号库，tmp_path 下没有 Cookie 缓存文件即未登录
+    assert browser_login["browser_name"] != "APK"
+    assert browser_login["authenticated"] is False
+    assert "accounts" not in browser_login
+
+
+def test_runtime_apk_profile_exists_is_false_without_accounts(tmp_path):
+    """apk 的 profile_exists 语义是"账号库里有已存账号"，不能恒为 True。"""
+    facade = FakeFacade()
+    facade.auth_status = lambda: {"backend": "apk", "authenticated": False,
+                                  "accounts": []}
+    runtime = WebRuntime(replace(_settings(tmp_path), source_backend="apk"),
+                         facade=facade, persist_settings=False)
+
+    assert runtime.login_status()["profile_exists"] is False
+
+
+def test_runtime_forwards_apk_password_login(tmp_path):
+    runtime = WebRuntime(_settings(tmp_path), facade=FakeFacade(),
+                         persist_settings=False)
+
+    result = runtime.apk_login_password(
+        "13800138000", "secret", "mobile", {"lot_number": "lot"},
+    )
+
+    assert result == {
+        "authenticated": True, "account": "13800138000", "password": "secret",
+        "mode": "mobile", "fds_otp": {"lot_number": "lot"},
+    }
+
+
+def test_runtime_switches_apk_account_only_while_idle(tmp_path):
+    facade = FakeFacade()
+    runtime = WebRuntime(_settings(tmp_path), facade=facade,
+                         persist_settings=False)
+
+    assert runtime.apk_switch_account("200")["uid"] == "200"
+    assert runtime.apk_delete_account("200")["deleted"] == "200"
+
+    runtime._operation = {"status": "running", "label": "恢复全部"}
+    with pytest.raises(OperationBusyError, match="正在运行"):
+        runtime.apk_switch_account("100")
+    with pytest.raises(OperationBusyError, match="正在运行"):
+        runtime.apk_login_password(
+            "13800138000", "secret", "mobile", {"lot_number": "lot"},
+        )
 
 
 def test_runtime_filters_and_pages_task_snapshots(tmp_path):

@@ -2,6 +2,17 @@
 
 Ximalaya-Downloader-Next 是一个面向个人授权内容的喜马拉雅音频下载工具，当前提供 WebUI、CLI 和 Python API。项目仍处于开发阶段，默认使用本地 Python `xm-sign` + HTTP 音源链路。
 
+四个可选音源后端（`Settings.source_backend` / `--source-backend`）：
+
+| 值 | 说明 |
+|---|---|
+| `http` | 默认。本地 `xm-sign` + 网页端 `baseInfo` |
+| `pc` | 桌面客户端接口，纯 HTTP、不启动浏览器，支持 VIP 音频 |
+| `chrome` | 浏览器/CDP 兼容路径，主要用于登录与诊断 |
+| `apk` | Android APK 9.5.1.3 协议，身份与浏览器完全隔离 |
+
+`http`、`pc`、`chrome` 共用 `xdl login` 保存的同一份浏览器身份；`apk` 用自己的短信登录与 `~/.xdl/apk/`。
+
 安装和命令用法见 [README](../README.md)，内部结构见 [架构设计](./architecture.md)。
 
 ## 当前主流程
@@ -47,9 +58,12 @@ WebUI / CLI / Python API
 - CLI 可通过 `--concurrency N` 调整专辑下载与恢复的异步并发数，默认保持 `1`。
 - 最小化风控事件记录与离线 `risk-report`。
 - 本地 Python `xm-sign` 实现及离线契约测试。
+- `xdl track -F` 列出全部可用音质格式，只读播放元数据、不下载。
+- PC 桌面端后端：纯 HTTP 无浏览器参与，付费/VIP 曲目走 `baseInfo` 加密 `playUrlList` 解密。
+- Android APK 协议后端：独立短信登录与多账号切换，native 算法纯 Python 实现，运行时不需要 Java 或 `.so`。
 - Chrome/CDP 音源兼容后端（接管的浏览器跟随 `--browser` 设置，Chrome 或 Edge）。
 - 可选的设备信息刷新实验：识别到风控后可刷新本地设备信息并重试当前曲（默认关闭，不保证有效）。
-- 本机 WebUI：下载任务、登录、任务恢复、音质探测、风控报告、设备/Cookie 诊断和完整运行设置。
+- 本机 WebUI：下载任务、登录/登出、任务恢复与删除、音质探测、风控报告、设备/Cookie 诊断和完整运行设置。
 
 ## 明确限制
 
@@ -58,6 +72,8 @@ WebUI / CLI / Python API
 - 当前自动化测试不会向真实平台发请求，因此只能证明本地算法、载荷和解析契约，不能证明线上持续可用。
 - 历史 CDP 音源在特定环境下出现过验证码以及 `1001` / `3005`；它已降级为兼容路径。
 - 设备信息刷新实验不能替代登录、内容授权或服务端风控判断，也不保证一定可继续下载。
+- APK 协议常量绑定 9.5.1.3 版本，平台改版后需要重新提取；官方 native 库不随仓库分发，只在协议升级做差分验证时才需要自行准备。
+- 三条链路的请求额度各自独立，任何后端都只能降低触发风控的概率，不能保证不触发。
 - 当前没有内容搜索、桌面壳、单文件可执行程序或自动更新。
 
 ## 仓库结构
@@ -69,11 +85,15 @@ src/xdl/
 ├─ application/          Facade、下载/恢复用例与重试调度
 ├─ adapters/
 │  ├─ sign/              xm-sign、Cookie 与设备信息适配器
+│  ├─ apk/               APK 协议：客户端、纯 Python native 算法、身份状态
 │  ├─ source_http.py     默认 HTTP 音源
+│  ├─ source_pc.py       PC 桌面端音源
 │  ├─ source_chrome.py   Chrome/CDP 兼容音源与登录实现
+│  ├─ decoder.py         播放地址解码（网页端 / PC 端）
 │  ├─ sink_file.py       文件下载与续传
+│  ├─ apk_sink.py        APK 下载连接的按集重新解析
 │  └─ store_sqlite.py    任务持久化
-├─ config/               平台常量、签名常量和用户数据路径
+├─ config/               平台常量、签名常量、APK 提取常量和用户数据路径
 ├─ frontends/            CLI、Web API/运行器与静态前端
 ├─ composition.py        装配根
 ├─ risk.py               风控事件与离线汇总
@@ -84,7 +104,7 @@ src/xdl/
 
 优先级按合并后的真实维护价值排序：
 
-1. 用低频、授权的真实样本验证默认 HTTP 后端，并把结果记录为环境相关证据。
+1. 用低频、授权的真实样本分别验证 HTTP、PC 与 APK 三个后端，并把结果记录为环境相关证据。
 2. 把目前保留的高级诊断与实验性设备信息入口迁出普通运行路径，经过弃用周期后再删除或收敛公开入口。
 3. 消除 `Facade.from_config` 与装配根之间的延迟导入环，并补充静态类型检查。
 4. 为发布增加 CI、覆盖率报告、锁定的依赖测试矩阵和可安装包验证。

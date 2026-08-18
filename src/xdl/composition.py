@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""装配根（依赖注入，见 docs/architecture.md §1、§3）。
+"""装配根（依赖注入，见 docs/architecture.md「架构目标」「下载链路与音源后端」）。
 
 按配置把适配器接到端口上，组装出供前端调用的门面。
 未来要替换实现（如新增本地签名、换音源），只改这里。
@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from .settings import Settings
 from .adapters import (Www2Decoder, FileSink, ChromeSource, HttpSource,
-                       PcHttpSource, PySignProvider, SqliteTaskStore)
+                       PcHttpSource, PySignProvider, SqliteTaskStore,
+                       ApkClient, ApkNativeBridge, ApkSource, ApkStateStore,
+                       ApkMediaSink)
 from .application import Facade
 from .errors import ConfigError
 from .risk import RiskEventRecorder
@@ -20,7 +22,9 @@ def build_facade(settings: Settings | None = None) -> Facade:
     risk_recorder = RiskEventRecorder(settings.risk_log_path)
 
     source = _build_source(settings, decoder, risk_recorder)
-    sink = FileSink(http_timeout=settings.http_timeout)
+    sink = (ApkMediaSink(source, http_timeout=settings.http_timeout)
+            if isinstance(source, ApkSource)
+            else FileSink(http_timeout=settings.http_timeout))
 
     def store_factory():
         return SqliteTaskStore(settings.task_db_path)
@@ -123,7 +127,24 @@ def _build_source(settings: Settings, decoder, risk_recorder):
             reset_device_fingerprint=settings.reset_device_fingerprint,
             browser=browser,
         )
+    if backend == "apk":
+        bridge = ApkNativeBridge(
+            java_path=settings.apk_java_path,
+            signer_jar=settings.apk_signer_jar,
+            libcxx=settings.apk_libcxx_path,
+            login_so=settings.apk_login_so_path,
+            xuid_so=settings.apk_xuid_so_path,
+            encrypt_so=settings.apk_encrypt_so_path,
+            asset_dir=settings.apk_asset_dir,
+            timeout=settings.apk_native_timeout,
+        )
+        state = ApkStateStore(settings.apk_state_dir)
+        return ApkSource(
+            ApkClient(bridge, state, timeout=settings.apk_request_timeout),
+            max_consecutive_failures=settings.apk_max_consecutive_failures,
+            risk_recorder=risk_recorder,
+        )
     raise ConfigError(
         f"未知音源后端 {settings.source_backend!r}；"
-        "可选值为 'http'、'pc' 或 'chrome'。"
+        "可选值为 'http'、'pc'、'chrome' 或 'apk'。"
     )

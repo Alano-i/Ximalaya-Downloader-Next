@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""类型化异常体系（见 docs/architecture.md §10.1）。
+"""类型化异常体系（见 docs/architecture.md「错误模型」）。
 
 每个异常带 retryable 标志，未来任务引擎据此决定重试策略。
 当前 MVP 只用到其中一部分，但先把体系立起来，方便后续接入引擎。
@@ -19,6 +19,20 @@ class ConfigError(XdlError):
 class AuthError(XdlError):
     """未登录 / 会话过期 / 未授权。"""
     category = "auth"
+
+
+class LoginRequiredError(AuthError):
+    """会话缺失或已失效；继续请求同一批次没有意义。"""
+
+
+class DownloadLimitError(AuthError):
+    """账号级下载额度已耗尽。"""
+    category = "download_limit"
+
+
+class ConsecutiveFailureError(XdlError):
+    """APK 批次连续失败达到阈值；停止继续请求后续曲目。"""
+    category = "consecutive_failures"
 
 
 class SignError(XdlError):

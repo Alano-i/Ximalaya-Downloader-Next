@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""门面（库的公开 API，见 docs/architecture.md §11）。
+"""门面（库的公开 API，见 docs/architecture.md「模块边界」）。
 
 各前端（CLI / 未来 WebUI）只依赖这一层。公开方法保持**同步**签名，内部用
 asyncio 驱动异步解析/并发（`asyncio.run` 收口），前端零改动。
@@ -14,8 +14,8 @@ from collections.abc import Callable
 
 from ..domain import Quality, TaskState, parse_range, parse_track_id
 from ..errors import XdlError
-from ..ports import (TaskDeleteResult, TaskQueryResult,
-                     TaskSelectionSummary)
+from ..ports import (SynchronouslyClosableSource, TaskDeleteResult,
+                     TaskQueryResult, TaskSelectionSummary)
 from ..settings import Settings
 from .usecases import (DownloadTrackUseCase, DownloadAlbumUseCase, AlbumResult,
                        ResumeUseCase, RetryPolicy, RiskRecoveryPolicy)
@@ -63,21 +63,73 @@ class Facade:
             reset=reset, cancel=cancel, notify=notify)
 
     def auth_status(self) -> dict:
-        """当前音源的登录态；音源未实现时按“未登录”回报。"""
         method = getattr(self._source, "auth_status", None)
         if method is None:
             return {"backend": self._settings.source_backend,
                     "authenticated": False, "multi_step": False}
         return method()
 
+    def login_config(self) -> dict:
+        method = getattr(self._source, "login_config", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 协议登录。")
+        return method()
+
+    def send_login_sms(self, mobile: str, fds_otp: dict) -> dict:
+        method = getattr(self._source, "send_sms", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 短信登录。")
+        return method(mobile, fds_otp)
+
+    def verify_login_sms(self, code: str) -> dict:
+        method = getattr(self._source, "verify_sms", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 短信登录。")
+        return self._finish_login(method(code))
+
+    def login_password(self, account: str, password: str, mode: str,
+                       fds_otp: dict) -> dict:
+        method = getattr(self._source, "login_password", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 账号密码登录。")
+        return self._finish_login(method(account, password, mode, fds_otp))
+
+    def _finish_login(self, result: dict) -> dict:
+        """统一持久登录结果后的鉴权失败任务恢复。"""
+        requeued = 0
+        if result.get("authenticated"):
+            store = self._task_store()
+            if store is not None:
+                try:
+                    requeue = getattr(store, "requeue_failed_category", None)
+                    if requeue is not None:
+                        requeued = requeue("auth")
+                finally:
+                    store.close()
+                    if self._store is store:
+                        self._store = None
+        return {**result, "requeued_auth_tasks": requeued}
+
     def logout(self) -> dict:
         method = getattr(self._source, "logout", None)
         if method is None:
             raise XdlError("当前音源不支持独立登出。")
-        # 后端的 logout 会回报清掉了哪些凭据（Cookie 缓存 / Profile），一并带
-        # 出去，前端才能说清“到底删了什么”。
+        # 浏览器后端的 logout 会回报清掉了哪些凭据（Cookie 缓存 / Profile），
+        # 一并带出去，前端才能说清"到底删了什么"。APK 侧返回 None。
         detail = method() or {}
         return {**self.auth_status(), **detail}
+
+    def switch_account(self, uid: str) -> dict:
+        method = getattr(self._source, "switch_account", None)
+        if method is None:
+            raise XdlError("当前音源不支持 APK 多账号切换。")
+        return method(uid)
+
+    def delete_account(self, uid: str) -> dict:
+        method = getattr(self._source, "delete_account", None)
+        if method is None:
+            raise XdlError("当前音源不支持删除 APK 账号。")
+        return method(uid)
 
     def download_track(self, target: str, quality: str | None = None,
                        reporter=None, cancel: threading.Event | None = None) -> str:
@@ -159,6 +211,11 @@ class Facade:
             close = getattr(store, "close", None)
             if close is not None:
                 close()
+        # 持有长驻连接的音源（如 APK 的 HTTP 会话）经可选端口同步释放，
+        # 而不是伸手进适配器内部结构（.client.close()）——后者是 Message
+        # Chain，破坏了"应用层只依赖端口"的约束。
+        if isinstance(self._source, SynchronouslyClosableSource):
+            self._source.close_sync()
 
     def list_formats(self, target: str) -> dict:
         """列出某个曲目所有可用音质格式（类似 yt-dlp -F）。
@@ -223,6 +280,15 @@ class Facade:
         store = self._task_store()
         if store is None:
             return []
+        # 已登录时恢复此前因鉴权失败的任务：登录后第一次 resume 不该让用户
+        # 手动挑出那些"当时没登录所以失败"的条目。与具体后端无关——任何能在
+        # auth_status 里报告登录态的音源都走这段通用恢复。
+        if self.auth_status().get("authenticated"):
+            requeue = getattr(store, "requeue_failed_category", None)
+            if requeue is not None:
+                restored = await asyncio.to_thread(requeue, "auth")
+                if restored and reporter is not None:
+                    reporter.note(f"已登录，已恢复 {restored} 个鉴权失败任务。")
         stop_event = asyncio.Event()
         cancel_event = threading.Event()
         cleanup_signal = self._install_sigint_handler(stop_event, cancel_event)

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""xm-sign 生成算法所需的常量（见 docs/architecture.md §7.1）。
+"""xm-sign 生成算法所需的常量（见 docs/architecture.md「xm-sign」）。
 
 算法与 `liuziheng20091106/easy-sign` 仓库的 `xm_sign_toolkit/core.py` 一致：
 

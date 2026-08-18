@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""在线音源适配器（实现 Source 端口，见 docs/architecture.md §7.1/§7.2）。
+"""在线音源适配器（实现 Source 端口，见 docs/architecture.md「浏览器 CDP 兼容音源」）。
 
 单曲解析走「让页面自己签名」：加载已登录的 /sound 页，页面内 du_web_sdk 生成
 xm-sign 并发出 baseInfo 请求，适配器只读监听网络响应并提取目标 trackId 的结果。

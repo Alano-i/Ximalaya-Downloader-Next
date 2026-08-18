@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""解码器金标向量测试（见 docs/architecture.md §10.3）。
+"""解码器金标向量测试（见 docs/architecture.md「HTTP 音源」「PC 桌面端音源」）。
 
 用一条真实捕获的「加密输入 → 已知解密输出」样本钉死 www2 解码算法；
 置换表/密钥若被误改，这条立刻报红。样本中的 token 等仅为历史值，

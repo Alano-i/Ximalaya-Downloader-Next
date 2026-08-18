@@ -44,6 +44,12 @@ const IDLE_OPERATION_POLL_MS = 4000;
 const ACTIVE_TASK_POLL_MS = 1500;
 const IDLE_TASK_POLL_MS = 10000;
 let riskReportPromise = null;
+let apkCaptcha = null;
+let apkLoginConfig = null;
+let geetestLoader = null;
+let apkSmsCooldownTimer = null;
+let apkSmsCooldownUntil = 0;
+let apkLoginMode = "sms";
 
 const terminalStatuses = new Set(["succeeded", "failed", "stopped"]);
 const operationLabels = {
@@ -89,7 +95,7 @@ function toast(message, type = "success") {
   node.textContent = message;
   region.append(node);
   // top layer 按进入顺序叠放，所以每条提示都重新 show 一次，才能盖住在它之前
-  // 用 showModal() 打开的确认弹窗。不支持 popover 的浏览器退回 z-index。
+  // 打开的 modal（比如 APK 登录面板）。不支持 popover 的浏览器退回 z-index。
   raiseToastRegion();
   window.setTimeout(() => {
     node.remove();
@@ -111,6 +117,12 @@ function hideToastRegion() {
 }
 
 function openLogin() {
+  if ((state.settings?.source_backend || "http") === "apk") {
+    renderApkAccounts();
+    setApkLoginMode(apkLoginMode);
+    $("#apk-login-dialog").showModal();
+    return;
+  }
   // 登录总是先清掉专用 Profile 再开浏览器（见后端 interactive_login），所以
   // 已登录状态下这里没有"再登录一次"的入口——想换号请先登出。
   startOperation("/api/operations/login");
@@ -121,6 +133,365 @@ function openLogin() {
 function onLoginEntry() {
   if (state.login?.authenticated) return confirmLogout();
   openLogin();
+}
+
+function renderApkAccounts() {
+  const list = $("#apk-account-list");
+  if (!list) return;
+  const accounts = Array.isArray(state.login?.accounts) ? state.login.accounts : [];
+  $("#apk-account-count").textContent = `${accounts.length} 个`;
+  if (!accounts.length) {
+    list.innerHTML = '<p class="apk-account-empty">暂无账号，完成下方任一登录后会自动保存。</p>';
+    return;
+  }
+  list.innerHTML = accounts.map((account) => `
+    <div class="apk-account-row ${account.active ? "is-active" : ""}">
+      <div class="apk-account-identity">
+        <span class="apk-account-uid">UID ${escapeHtml(account.uid)}</span>
+        <span class="apk-account-meta">${account.active ? "当前使用" : "登录态已保存"}</span>
+      </div>
+      <div class="apk-account-actions">
+        ${account.active ? "" : `<button class="button secondary" type="button"
+          data-apk-account-action="switch" data-apk-account-uid="${escapeHtml(account.uid)}">切换</button>`}
+        <button class="button secondary" type="button"
+          data-apk-account-action="delete" data-apk-account-uid="${escapeHtml(account.uid)}">删除</button>
+      </div>
+    </div>`).join("");
+}
+
+async function mutateApkAccount(action, uid) {
+  const path = action === "switch"
+    ? "/api/apk-auth/switch" : "/api/apk-auth/accounts/delete";
+  try {
+    const result = await api(path, {
+      method: "POST", body: JSON.stringify({ uid }),
+    });
+    state.login = { ...state.login, ...result };
+    renderApkAccounts();
+    renderHeader();
+    toast(action === "switch"
+      ? `已切换到 APK 账号 UID ${uid}，可点击“恢复全部”继续`
+      : `已删除 APK 账号 UID ${uid}`);
+    await loadBootstrap(false);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function confirmDeleteApkAccount(uid) {
+  openDialog({
+    title: `删除 APK 账号 UID ${uid}？`,
+    sub: "只会删除本机保存的该账号登录态。",
+    lines: [
+      '<div class="line warn"><i></i><span>删除后如需再次使用该账号，必须重新登录。</span></div>',
+    ],
+    confirmText: "删除账号",
+    safeNote: "其他 APK 账号、浏览器登录态和下载记录不会受到影响。",
+    onConfirm: () => mutateApkAccount("delete", uid),
+  });
+}
+
+function setApkLoginMode(mode) {
+  apkLoginMode = ["sms", "mobile", "email"].includes(mode) ? mode : "sms";
+  $$('[data-apk-login-mode]').forEach((button) => {
+    const active = button.dataset.apkLoginMode === apkLoginMode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  $('[data-apk-login-panel="sms"]').classList.toggle("is-hidden", apkLoginMode !== "sms");
+  $('[data-apk-login-panel="password"]').classList.toggle("is-hidden", apkLoginMode === "sms");
+  $("#apk-submit-sms").classList.toggle("is-hidden", apkLoginMode !== "sms");
+  if (apkLoginMode === "sms") {
+    setApkLoginMessage("输入手机号后获取短信验证码。", "info");
+    return;
+  }
+  const email = apkLoginMode === "email";
+  $("#apk-account-label").textContent = email ? "邮箱" : "手机号";
+  $("#apk-account").placeholder = email ? "请输入邮箱" : "请输入手机号";
+  $("#apk-account").inputMode = email ? "email" : "tel";
+  setApkLoginMessage(`输入${email ? "邮箱" : "手机号"}和密码后完成安全验证。`, "info");
+}
+
+function requireApkLogin() {
+  if ((state.settings?.source_backend || "http") !== "apk"
+      || state.login?.authenticated) return true;
+  openLogin();
+  setApkLoginMessage("请先登录 APK 协议账号，再开始下载或恢复任务。", "warning");
+  return false;
+}
+
+function setApkLoginMessage(message, type = "info") {
+  const node = $("#apk-login-message");
+  node.textContent = message;
+  node.dataset.type = type;
+}
+
+function setApkSmsBusy(busy) {
+  const button = $("#apk-send-sms");
+  if (!busy && apkSmsCooldownUntil > Date.now()) return;
+  button.disabled = busy;
+  button.textContent = busy ? "正在打开安全验证…" : "获取短信验证码";
+}
+
+function setApkCaptchaVerified(verified) {
+  const help = $("#apk-sms-help");
+  help.classList.toggle("is-verified", verified);
+  help.textContent = verified ? "✓ 安全验证成功" : "点击后完成 GeeTest 安全验证";
+}
+
+function startApkSmsCooldown(seconds = 180) {
+  window.clearInterval(apkSmsCooldownTimer);
+  apkSmsCooldownUntil = Date.now() + Math.max(1, Number(seconds) || 180) * 1000;
+  const update = () => {
+    const remaining = Math.max(0, Math.ceil((apkSmsCooldownUntil - Date.now()) / 1000));
+    const button = $("#apk-send-sms");
+    if (remaining > 0) {
+      button.disabled = true;
+      button.textContent = `${remaining} 秒后可重试`;
+      return;
+    }
+    window.clearInterval(apkSmsCooldownTimer);
+    apkSmsCooldownTimer = null;
+    apkSmsCooldownUntil = 0;
+    button.disabled = false;
+    button.textContent = "获取短信验证码";
+    setApkCaptchaVerified(false);
+  };
+  update();
+  apkSmsCooldownTimer = window.setInterval(update, 1000);
+}
+
+function hideApkLoginForCaptcha() {
+  const dialog = $("#apk-login-dialog");
+  // showModal() 会让其余文档进入 inert 状态；GeeTest 挂在 body 下，保持 modal
+  // 会导致验证层即使可见也无法交互。同步切换为非模态 open 状态后再隐藏，
+  // 表单节点和输入值均保留，页面交互同时恢复。
+  if (dialog.open) dialog.close();
+  dialog.show();
+  dialog.classList.add("is-captcha-hidden");
+  dialog.setAttribute("aria-hidden", "true");
+}
+
+function restoreApkLoginAfterCaptcha() {
+  const dialog = $("#apk-login-dialog");
+  dialog.classList.remove("is-captcha-hidden");
+  dialog.removeAttribute("aria-hidden");
+  if (dialog.open) dialog.close();
+  dialog.showModal();
+}
+
+function loadGeetestSdk() {
+  if (typeof window.initGeetest4 === "function") return Promise.resolve();
+  if (geetestLoader) return geetestLoader;
+  geetestLoader = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-xdl-geetest]');
+    const script = existing || document.createElement("script");
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      if (!error && typeof window.initGeetest4 === "function") resolve();
+      else {
+        script.remove();
+        geetestLoader = null;
+        reject(error || new Error("GeeTest SDK 初始化失败，请检查网络后重试。"));
+      }
+    };
+    const timer = window.setTimeout(
+      () => finish(new Error("安全验证加载超时，请检查网络后重试。")), 12000,
+    );
+    script.addEventListener("load", () => finish(), { once: true });
+    script.addEventListener("error", () => finish(
+      new Error("无法加载 GeeTest 安全验证，请检查网络后重试。"),
+    ), { once: true });
+    if (!existing) {
+      script.src = "https://static.geetest.com/v4/gt4.js";
+      script.async = true;
+      script.dataset.xdlGeetest = "true";
+      document.head.append(script);
+    }
+  });
+  return geetestLoader;
+}
+
+async function apkSendSms() {
+  if (apkSmsCooldownUntil > Date.now()) return;
+  setApkCaptchaVerified(false);
+  setApkSmsBusy(true);
+  setApkLoginMessage("正在加载安全验证…", "loading");
+  try {
+    const mobile = $("#apk-mobile").value.trim();
+    if (!/^\+?\d{6,18}$/.test(mobile)) throw new Error("手机号格式无效");
+    await loadGeetestSdk();
+    apkLoginConfig ||= await api("/api/apk-auth/config");
+    apkCaptcha ||= await new Promise((resolve, reject) => {
+      try {
+        window.initGeetest4({
+          captchaId: apkLoginConfig.captcha_id,
+          product: "bind",
+          language: "zho",
+        }, resolve);
+      } catch (error) { reject(error); }
+    });
+    const captcha = apkCaptcha;
+    captcha.onSuccess(async () => {
+      if (apkCaptcha !== captcha) return;
+      try {
+        const fdsOtp = captcha.getValidate();
+        apkCaptcha = null;
+        captcha.destroy?.();
+        restoreApkLoginAfterCaptcha();
+        setApkCaptchaVerified(true);
+        setApkLoginMessage("安全验证通过，正在发送短信验证码…", "loading");
+        const sms = await api("/api/apk-auth/sms", {
+          method: "POST", body: JSON.stringify({ mobile, fds_otp: fdsOtp }),
+        });
+        setApkLoginMessage("验证码已发送，请填写短信验证码。", "success");
+        startApkSmsCooldown(sms.retry_after_seconds || 180);
+        $("#apk-code").focus();
+      } catch (error) {
+        setApkLoginMessage(error.message, "error");
+      } finally {
+        setApkSmsBusy(false);
+        restoreApkLoginAfterCaptcha();
+      }
+    });
+    captcha.onError((error) => {
+      if (apkCaptcha !== captcha) return;
+      setApkLoginMessage(error?.msg || "安全验证失败，请重试。", "error");
+      setApkCaptchaVerified(false);
+      apkCaptcha = null;
+      captcha.destroy?.();
+      setApkSmsBusy(false);
+      restoreApkLoginAfterCaptcha();
+    });
+    captcha.onClose?.(() => {
+      if (apkCaptcha !== captcha) return;
+      setApkLoginMessage("安全验证已取消，可以重新获取验证码。", "info");
+      setApkCaptchaVerified(false);
+      apkCaptcha = null;
+      captcha.destroy?.();
+      setApkSmsBusy(false);
+      restoreApkLoginAfterCaptcha();
+    });
+    setApkLoginMessage("请完成弹出的安全验证。", "loading");
+    // 原生 <dialog> 位于浏览器 top layer；GeeTest 将浮层挂到普通 body 下。
+    // 保持 dialog.open 不变，仅在验证期间 display:none，避免改变弹窗状态；
+    // 完成、取消或失败后移除隐藏类即可原位恢复。
+    hideApkLoginForCaptcha();
+    captcha.showCaptcha();
+  } catch (error) {
+    setApkLoginMessage(error.message, "error");
+    setApkSmsBusy(false);
+    restoreApkLoginAfterCaptcha();
+  }
+}
+
+async function apkVerifyLogin(event) {
+  event.preventDefault();
+  if (apkLoginMode !== "sms") return;
+  try {
+    const result = await api("/api/apk-auth/verify", {
+      method: "POST", body: JSON.stringify({ code: $("#apk-code").value.trim() }),
+    });
+    completeApkLogin(result);
+  } catch (error) {
+    setApkLoginMessage(error.message, "error");
+  }
+}
+
+function completeApkLogin(result) {
+  setApkLoginMessage(result.authenticated ? "登录成功。" : "登录未完成。",
+    result.authenticated ? "success" : "error");
+  if (!result.authenticated) return;
+  $("#apk-login-dialog").close();
+  const requeued = Number(result.requeued_auth_tasks || 0);
+  toast(requeued
+    ? `APK 协议登录成功，已恢复 ${requeued} 条鉴权失败任务`
+    : "APK 协议登录成功");
+  loadBootstrap(false);
+}
+
+async function apkPasswordLogin() {
+  const account = $("#apk-account").value.trim();
+  const password = $("#apk-password").value;
+  if (apkLoginMode === "mobile" && !/^\+?\d{6,18}$/.test(account)) {
+    setApkLoginMessage("手机号格式无效。", "error");
+    return;
+  }
+  if (apkLoginMode === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(account)) {
+    setApkLoginMessage("邮箱格式无效。", "error");
+    return;
+  }
+  if (!password) {
+    setApkLoginMessage("请输入密码。", "error");
+    return;
+  }
+  const button = $("#apk-password-captcha");
+  button.disabled = true;
+  button.textContent = "正在打开安全验证…";
+  setApkLoginMessage("正在加载安全验证…", "loading");
+  try {
+    await loadGeetestSdk();
+    apkLoginConfig ||= await api("/api/apk-auth/config");
+    const captcha = await new Promise((resolve, reject) => {
+      try {
+        window.initGeetest4({
+          captchaId: apkLoginConfig.captcha_id,
+          product: "bind",
+          language: "zho",
+        }, resolve);
+      } catch (error) { reject(error); }
+    });
+    apkCaptcha = captcha;
+    captcha.onSuccess(async () => {
+      if (apkCaptcha !== captcha) return;
+      let loginCompleted = false;
+      try {
+        const fdsOtp = captcha.getValidate();
+        apkCaptcha = null;
+        captcha.destroy?.();
+        restoreApkLoginAfterCaptcha();
+        $("#apk-password-help").textContent = "✓ 安全验证成功";
+        $("#apk-password-help").classList.add("is-verified");
+        setApkLoginMessage("安全验证通过，正在登录…", "loading");
+        const result = await api("/api/apk-auth/password", {
+          method: "POST",
+          body: JSON.stringify({ account, password, mode: apkLoginMode, fds_otp: fdsOtp }),
+        });
+        $("#apk-password").value = "";
+        loginCompleted = Boolean(result.authenticated);
+        completeApkLogin(result);
+      } catch (error) {
+        setApkLoginMessage(error.message, "error");
+      } finally {
+        button.disabled = false;
+        button.textContent = "安全验证并登录";
+        // 登录成功时 completeApkLogin 已关闭弹窗；失败时恢复原表单供重试。
+        if (!loginCompleted) restoreApkLoginAfterCaptcha();
+      }
+    });
+    const failed = (message) => {
+      if (apkCaptcha !== captcha) return;
+      apkCaptcha = null;
+      captcha.destroy?.();
+      button.disabled = false;
+      button.textContent = "安全验证并登录";
+      setApkLoginMessage(message, "error");
+      restoreApkLoginAfterCaptcha();
+    };
+    captcha.onError((error) => failed(error?.msg || "安全验证失败，请重试。"));
+    captcha.onClose?.(() => failed("安全验证已取消。"));
+    setApkLoginMessage("请完成弹出的安全验证。", "loading");
+    hideApkLoginForCaptcha();
+    captcha.showCaptcha();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "安全验证并登录";
+    setApkLoginMessage(error.message, "error");
+    restoreApkLoginAfterCaptcha();
+  }
 }
 
 function switchView(view) {
@@ -171,16 +542,21 @@ function renderHeader() {
   const loginText = $("#login-status-text");
   const backend = state.settings?.source_backend || "http";
   // 登录态按浏览器分家，所以状态里必须带上"是哪个浏览器"，否则用户切换浏览器后
-  // 只会看到莫名其妙的"尚未登录"。
+  // 只会看到莫名其妙的"尚未登录"。apk 后端不碰浏览器，这里会拿到 "APK"。
   const browserName = state.login?.browser_name || "";
   const prefix = browserName ? `${browserName} · ` : "";
-  renderLoginEntry(browserName);
+  renderLoginEntry(backend, browserName);
   const other = state.login?.other_browser_authenticated;
   const otherName = other === "edge" ? "Edge" : other === "chrome" ? "Chrome" : "";
   if (state.login?.authenticated) {
     loginText.textContent = `${prefix}已保存登录态`;
     loginButton.classList.remove("is-warning");
     loginButton.title = "点击登出";
+  } else if (backend === "apk") {
+    // apk 后端没有浏览器 Profile，下面那几个浏览器分支的措辞都不适用
+    loginText.textContent = `${prefix}尚未登录`;
+    loginButton.classList.add("is-warning");
+    loginButton.title = "点击登录 APK 协议账号";
   } else if (otherName) {
     loginText.textContent = `${prefix}尚未登录`;
     loginButton.classList.add("is-warning");
@@ -196,7 +572,9 @@ function renderHeader() {
     loginButton.title = "点击打开浏览器登录";
   }
   $("#backend-status").textContent =
-    backend === "pc" ? "PC 桌面端接口" : backend === "http" ? "HTTP 后端" : "浏览器后端";
+    backend === "pc" ? "PC 桌面端接口"
+      : backend === "http" ? "HTTP 后端"
+        : backend === "apk" ? "Android APK 协议" : "浏览器后端";
   $("#concurrency-status").textContent = `并发 ${state.settings?.max_concurrency ?? 1}`;
   if (state.settings?.default_quality) {
     $("#download-quality").value = state.settings.default_quality;
@@ -205,24 +583,37 @@ function renderHeader() {
 
 // 登录入口只有一个按钮，跟着登录态走：未登录显示"登录"，已登录显示"登出"。
 // 想换账号 = 登出（清凭据）→ 登录（重开浏览器）两步，没有独立的"换账号"动作。
-function renderLoginEntry(browserName) {
+// apk 后端走独立账号库（弹自带的登录面板），其余后端开真浏览器登录。
+function renderLoginEntry(backend, browserName) {
   const button = $("#login-entry-button");
   if (!button) return;
   const authenticated = Boolean(state.login?.authenticated);
-  const name = browserName || "浏览器";
-  button.textContent = authenticated ? "登出" : `${name} 登录`;
-  button.title = authenticated
-    ? `清除本机保存的登录凭据（Cookie 缓存与 ${name} 专用 Profile）`
-    : `下载前请先在 ${name} 中登录喜马拉雅`;
+  if (backend === "apk") {
+    button.textContent = authenticated ? "登出" : "APK 登录";
+    button.title = authenticated
+      ? `清除当前 APK 账号的登录态${state.login?.uid ? `（uid ${state.login.uid}）` : ""}`
+      : "下载前请先完成 APK 协议登录";
+  } else {
+    const name = browserName || "浏览器";
+    button.textContent = authenticated ? "登出" : `${name} 登录`;
+    button.title = authenticated
+      ? `清除本机保存的登录凭据（Cookie 缓存与 ${name} 专用 Profile）`
+      : `下载前请先在 ${name} 中登录喜马拉雅`;
+  }
   button.classList.toggle("is-warning", !authenticated);
 }
 
 function confirmLogout() {
+  const backend = state.settings?.source_backend || "http";
   const browserName = state.login?.browser_name || "浏览器";
   openDialog({
     title: "登出当前账号",
-    sub: "将删除本机保存的登录凭据，之后需要重新登录才能下载。",
-    lines: [
+    sub: backend === "apk"
+      ? "将清除当前 APK 协议账号的登录态。"
+      : "将删除本机保存的登录凭据，之后需要重新登录才能下载。",
+    lines: backend === "apk" ? [
+      '<div class="line warn"><i></i><span>清除后需要重新登录才能继续下载。</span></div>',
+    ] : [
       `<div class="line"><i></i><span>删除 Cookie 缓存 <strong>${
         escapeHtml(state.settings?.cookies_cache_path || "")}</strong></span></div>`,
       `<div class="line"><i></i><span>删除 ${escapeHtml(browserName)} 专用 Profile <strong>${
@@ -244,6 +635,7 @@ async function doLogout() {
     const result = await api("/api/auth/logout", { method: "POST" });
     state.login = result.login;
     renderHeader();
+    renderApkAccounts();
     toast("已登出，登录凭据已清除");
   } catch (error) {
     toast(error.message, "error");
@@ -755,11 +1147,11 @@ async function requeuePicked() {
   }
 }
 
-function openDialog({ title, sub, lines, confirmText, onConfirm }) {
+function openDialog({ title, sub, lines, confirmText, onConfirm, safeNote = "" }) {
   const root = $("#dialog-root");
   const previous = document.activeElement;
-  // 必须是原生 <dialog> + showModal()：它在浏览器 top layer 里，普通元素再高
-  // 的 z-index 也压不住；而且 showModal()
+  // 必须是原生 <dialog> + showModal()：APK 登录面板也是 showModal() 开的，
+  // 它在浏览器 top layer 里，普通元素再高的 z-index 也压不住；而且 showModal()
   // 会把文档其余部分置为 inert，普通遮罩即便看得见也点不动。
   root.innerHTML = `
     <dialog class="scrim" aria-label="${title}">
@@ -769,7 +1161,7 @@ function openDialog({ title, sub, lines, confirmText, onConfirm }) {
         <div class="consequences">${lines.join("")}</div>
         <div class="safe-note">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.4-3 7.7-7 9-4-1.3-7-4.6-7-9V6z"/><path d="m9 12 2 2 4-4"/></svg>
-          <span>已下载完成的音频文件<b>不会</b>被删除，只清理任务记录与未完成的临时文件。</span>
+          <span>${safeNote || "已下载完成的音频文件<b>不会</b>被删除，只清理任务记录与未完成的临时文件。"}</span>
         </div>
         <div class="dialog-actions">
           <button class="button secondary" type="button" data-dialog="cancel">取消</button>
@@ -809,6 +1201,7 @@ async function loadBootstrap(populateSettings = true) {
     state.settings = payload.settings;
     state.login = payload.login;
     renderHeader();
+    renderApkAccounts();
     applyOperation(payload.operation, { force: true });
     if (populateSettings || !state.settingsPopulated) {
       applyTaskPayload({
@@ -999,10 +1392,11 @@ async function saveSettings() {
       body: JSON.stringify(settingsPayload()),
     });
     state.settings = result.settings;
-    // 换后端/换浏览器等于换一套登录体系，登录态必须跟着换；只更新 settings 会让
-    // 头部继续显示上一套凭据的状态（例如切到另一个浏览器后仍写着已登录）。
+    // 换 source_backend 等于换一套登录体系，登录态必须跟着换；只更新 settings
+    // 会让头部继续显示上一个后端的登录信息（例如切到 pc 后仍写着 APK 已登录）。
     if (result.login) state.login = result.login;
     renderHeader();
+    renderApkAccounts();
     populateSettingsForm();
     toast("设置已保存，运行器已重新加载");
     window.setTimeout(() => refreshRuntime({ forceTasks: true }), 100);
@@ -1061,7 +1455,9 @@ document.addEventListener("click", (event) => {
     login: openLogin,
     "login-entry": onLoginEntry,
     logout: confirmLogout,
-    resume: () => startOperation("/api/operations/resume"),
+    resume: () => {
+      if (requireApkLogin()) startOperation("/api/operations/resume");
+    },
     stop: stopOperation,
     "open-downloads": () => openDownloads(),
     "refresh-risk": () => loadRiskReport(true),
@@ -1080,8 +1476,29 @@ document.addEventListener("click", (event) => {
   actions[action]?.();
 });
 
+$("#apk-send-sms").addEventListener("click", apkSendSms);
+$("#apk-login-form").addEventListener("submit", apkVerifyLogin);
+$("#apk-password-captcha").addEventListener("click", apkPasswordLogin);
+$$('[data-apk-login-mode]').forEach((button) => {
+  button.addEventListener("click", () => setApkLoginMode(button.dataset.apkLoginMode));
+});
+$$('[data-apk-login-close]').forEach((button) => button.addEventListener("click", () => {
+  $("#apk-password").value = "";
+  $("#apk-login-dialog").close();
+}));
+$("#apk-account-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-apk-account-action]");
+  if (!button) return;
+  if (button.dataset.apkAccountAction === "delete") {
+    confirmDeleteApkAccount(button.dataset.apkAccountUid);
+  } else {
+    mutateApkAccount(button.dataset.apkAccountAction, button.dataset.apkAccountUid);
+  }
+});
+
 $("#download-form").addEventListener("submit", (event) => {
   event.preventDefault();
+  if (!requireApkLogin()) return;
   startOperation("/api/operations/download", {
     mode: state.mode,
     target: $("#download-target").value.trim(),

@@ -2,7 +2,7 @@
 """专辑曲目清单（免签公开接口）—— `ChromeSource` 与 `HttpSource` 共享的实现。
 
 走「非 v1」getTracksList 接口：纯 HTTP、匿名可取、只回曲目元信息（id/标题/序号，
-不含 playUrl），每页固定 30 条。详见 docs/architecture.md §7.2 的备注。
+不含 playUrl），每页固定 30 条。详见 docs/architecture.md「HTTP 音源」的备注。
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""文件输出适配器（实现 MediaSink 端口，见 docs/architecture.md §8.2）。
+"""文件输出适配器（实现 MediaSink 端口，见 docs/architecture.md「任务与恢复」）。
 
 MVP：流式下载到 .part 临时文件，完成后原子重命名为最终文件（崩溃安全）。
 字节级 Range 续传留待任务引擎阶段接入。

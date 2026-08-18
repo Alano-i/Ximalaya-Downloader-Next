@@ -429,7 +429,7 @@ class PcHttpSource:
         if not play_urls:
             # VIP/付费曲目：playPathDto 通常只有 size 字段、明文地址全空，
             # 播放地址要走 baseInfo 加密 playUrlList 解密链路（PC 客户端
-            # 同样先调 baseInfo 再解密，见 .capture/play_request_analysis.md）。
+            # 同样先调 baseInfo 再解密，抓包记录不入库）。
             return self._fetch_paid_track(track_id)
         return Track(
             track_id=str(track_id),

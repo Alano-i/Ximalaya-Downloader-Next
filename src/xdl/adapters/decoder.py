@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""媒体解码适配器（实现 Decoder 端口，见 docs/architecture.md §7.3）。
+"""媒体解码适配器（实现 Decoder 端口，见 docs/architecture.md「HTTP 音源」「PC 桌面端音源」）。
 
 www2/mweb2 的音频 URL 解密：URL-safe Base64 → 还原 → S-Box 置换 → 双轮 XOR。
 这是最易随平台变动的部分，故独立成适配器，并配「金标向量」测试回归。

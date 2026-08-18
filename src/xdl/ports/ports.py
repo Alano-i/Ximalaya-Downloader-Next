@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""端口（抽象接口，见 docs/architecture.md §6）。
+"""端口（抽象接口，见 docs/architecture.md「模块边界」）。
 
 用 Protocol 描述核心需要的外部能力；适配器实现它们。
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from ..domain import Track, Album, DownloadTask, TaskState
+from ..domain import Track, Album, DownloadTask, TaskState, Quality
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class Decoder(Protocol):
 
 @runtime_checkable
 class SignProvider(Protocol):
-    """生成受保护接口请求所需的 xm-sign（见 docs/architecture.md §7.1）。
+    """生成受保护接口请求所需的 xm-sign（见 docs/architecture.md「xm-sign」）。
 
     受保护接口（当前为 `/mobile-playpage/track/v3/baseInfo/{timestamp}`）要求请求头里带 `xm-sign`，
     形如 ``{cadd}&&{sid}``。该端口把"如何拿到 xm-sign"这一易变点隔离起来：
@@ -93,10 +93,36 @@ class Source(Protocol):
 
 
 @runtime_checkable
+class QualityAwareSource(Protocol):
+    """可按目标音质直接解析单曲；当前仅 APK Source 实现。"""
+    async def get_track_for_quality(self, track_id: str, quality: Quality) -> Track: ...
+
+
+@runtime_checkable
+class SynchronouslyClosableSource(Protocol):
+    """可同步释放底层长连接能力的音源（可选能力）。
+
+    Facade 的 ``close()`` 是同步的（供常驻前端重载配置/关闭进程），无法 await
+    音源的异步 ``close()``。持有长驻连接（如 APK 的 HTTP 会话）的音源实现此
+    端口，让 Facade 不必伸手进适配器内部结构（``.client.close()``）——那是
+    Message Chain，破坏了"应用层只依赖端口"的约束。
+    """
+    def close_sync(self) -> None: ...
+
+
+@runtime_checkable
 class MediaSink(Protocol):
     """输出：把 URL 落盘（含进度回报、原子落盘）。"""
     def write(self, url: str, target_path: str, reporter: "ProgressReporter",
               cancel=None, progress_sink=None, expected_total: int = 0) -> None: ...
+
+
+@runtime_checkable
+class TrackResolvingMediaSink(Protocol):
+    """需要 track 上下文管理短生命周期 URL 的 sink；当前仅 APK 使用。"""
+    def write_track(self, url: str, track_id: str, quality: Quality,
+                    target_path: str, reporter: "ProgressReporter", cancel=None,
+                    progress_sink=None, expected_total: int = 0) -> None: ...
 
 
 @runtime_checkable
@@ -110,6 +136,7 @@ class TaskStore(Protocol):
     def record_progress(self, task_id: int, bytes_done: int, total: int) -> None: ...
     def requeue_stale(self) -> int: ...
     def requeue_retryable_failed(self) -> int: ...
+    def requeue_failed_category(self, category: str) -> int: ...
     def pending_albums(self) -> list[tuple[str, str, int]]: ...
     def pending_tasks(self, album_id: str) -> list[DownloadTask]: ...
     def query_tasks(self, *, state: TaskState | None = None, search: str = "",

@@ -42,9 +42,18 @@ HTTP/Chrome 音源、签名、解码、文件、SQLite 适配器
 
 WebUI 在 `frontends` 内进一步分成三层：FastAPI 只负责输入校验和 HTTP 状态，`WebRuntime` 串行化长操作并桥接 `Facade`，静态 HTML/CSS/JavaScript 只消费 JSON API。下载、恢复和诊断共用同一个操作槽，避免多个浏览器/音源会话或 SQLite 写入同时发生；设置仅在空闲时允许更新，并会安全关闭旧 `Facade` 后重新装配。
 
-## 3. 默认下载链路
+## 3. 下载链路与音源后端
 
-`Settings.source_backend` 默认是 `http`。
+`Settings.source_backend` 选择实现 `Source` 端口的适配器，默认 `http`：
+
+| 值 | 适配器 | 身份来源 | 定位 |
+|---|---|---|---|
+| `http` | `HttpSource` | 浏览器 Profile + Cookie 缓存 + 设备信息 | 默认；本地 `xm-sign` + 网页端 `baseInfo` |
+| `pc` | `PcHttpSource` | 同上（复用 `xdl login` 的会话） | 桌面客户端接口，纯 HTTP，批量更稳 |
+| `chrome` | `ChromeSource` | 同上 | 登录实现与兼容诊断路径 |
+| `apk` | `ApkSource` | `~/.xdl/apk/` 独立身份 | Android APK 协议，与浏览器身份隔离 |
+
+前三者共享同一套浏览器身份三件套与 `xm-sign` 链路（3.1–3.2）；`apk` 完全独立。
 
 ### 3.1 登录态
 
@@ -100,11 +109,36 @@ device_info
 4. 上报前整理 collector 快照（去掉内部 storage / 嵌套对象，消毒 Headless UA）；
 5. 若 session/hardware 身份字段（如 `GJ2`/`adi`/`acd`/`xz7`/`HW5`/`DP5`）相对换身前完全不变，则判定为假换身并中止，避免继续用旧画像连打。
 
-### 3.4 浏览器 CDP 兼容音源
+### 3.4 PC 桌面端音源
+
+`--source-backend pc` 选择 `PcHttpSource`，走桌面客户端使用的接口，登录态复用 `xdl login` 保存的同一份会话，全程纯 HTTP、不启动浏览器：
+
+| 用途 | 接口 |
+|---|---|
+| 专辑曲目清单 | `play/v1/show` |
+| 单集播放权限 | `play/v1/audio`（`canPlay`） |
+| 免费曲目播放地址 | `track/quality` |
+| 付费/VIP 播放地址 | `track/v3/baseInfo`（`device=win`）的加密 `playUrlList` → `WinEcbDecoder` |
+
+付费曲目的 `track/quality` 只返回试听片段，因此判权通过后改走 `baseInfo` 的加密 `playUrlList`，用 PC 端专属 AES-ECB 密钥解密（与 `config.apk.PLAY_URL_KEY` 是不同密钥，不可混用）。
+
+浏览器导出的 Cookie 缺少客户端形态的设备字段时，`baseInfo` 会因此判风控；`ensure_pc_device_cookies()` 按客户端格式补全后回写缓存。识别到风控时可复用与 HTTP 后端相同的换身链路。
+
+### 3.5 浏览器 CDP 兼容音源
 
 `--source-backend chrome` 选择 `ChromeSource`。它启动浏览器（Chrome 或 Edge，跟随 `--browser`/`Settings.browser`）后通过 CDP 连接，以只读网络响应监听取得目标 `baseInfo`；页面没有自行请求时会点击播放控件。
 
 该路径保留登录、诊断和兼容价值，但历史观测表明 CDP 环境可能被平台识别，因此不是默认下载实现。旧的设备状态重置实验默认关闭，也不在登录流程执行。
+
+### 3.6 APK 协议可选音源
+
+`--source-backend apk` 装配独立的 `ApkSource + ApkMediaSink`。它不读取浏览器 Profile、Cookie 或设备信息，运行数据位于 `~/.xdl/apk/`，与浏览器身份完全隔离；登录走 GeeTest 4 + 短信验证码，身份与登录态由 `ApkStateStore` 维护。
+
+native 算法（`create_xuid`、`ticket`/`x-tk`、登录参数 `sign`、`encryptMobile`、`decryptDownload` v0/1/2）已用纯 Python 还原在 `adapters/apk/native_py.py`，默认走这条路径（`ApkNativeBridge(prefer_python=True)`），**运行时不启动任何 Java 进程、也不需要 `.so` 资产**。常量集中在 `config/apk.py`，每组标注了来源库与反汇编地址以便审计。
+
+`prefer_python=False` 的 Java/Unidbg sidecar 路径保留下来，仅用于协议升级时与官方 `.so` 做差分比对：官方库由使用者自行从已授权安装的 APK 提取（清单与比对用 SHA-256 见 `vendor/apk_protocol/README.md`），`native_signer/` 的 Java 源码可 `mvn package` 自建。sidecar 启动前逐项校验资产清单与 SHA-256，缺清单或指纹不符即拒绝启动。
+
+下载清单只用于取得授权 trackId 和元数据；每个待下载 track 都通过 `mobile/download/v2/track/{trackId}` 单独获取本次连接，连接不写入 SQLite、也不跨集缓存。用例通过可选 `QualityAwareSource`/`TrackResolvingMediaSink` capability 分派进入 APK 路径，HTTP、PC、Chrome 三个 Source 与 `FileSink` 的调用保持不变。`ApkMediaSink` 为 CDN 添加 `requestType: download`，恢复 `.part` 前重新解析连接，连接失效时最多刷新一次。
 
 ## 4. 任务与恢复
 

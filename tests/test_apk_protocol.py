@@ -80,6 +80,16 @@ def test_native_bridge_requires_download_key_asset(tmp_path):
         bridge._validate()
 
 
+def test_native_bridge_requires_sha256_manifest(tmp_path):
+    """资产齐全但没有 manifest.json 时必须拒绝启动——没有清单，指纹校验形同虚设。"""
+    bridge = _native_bridge(tmp_path)
+    (tmp_path / "assets" / "drawable").mkdir()
+    (tmp_path / "assets" / "drawable" / "x_m.png").write_bytes(b"test")
+
+    with pytest.raises(ConfigError, match="SHA-256 清单"):
+        bridge._validate()
+
+
 def test_native_bridge_timeout_is_not_retried(monkeypatch, tmp_path):
     bridge = _native_bridge(tmp_path)
     calls = {"open": 0, "request": 0, "close": 0}

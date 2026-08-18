@@ -40,9 +40,10 @@ Python 实现与 `.so` 的输出逐字节一致（`tests/test_apk_native_py.py` 
 `native-signer.jar` 由本仓库 `native_signer/` 源码 `mvn package` 构建
 （Apache-2.0 / MIT，见 `native_signer/README.md`）——它是构建产物，同样不入库。
 
-准备好后，用 `Settings.apk_*` 字段指向它们；若同时放一份 `manifest.json`
-（格式见 `native_signer/README.md`），`ApkNativeBridge.open()` 会在启动前逐项
-校验 SHA-256，不符即抛 `ConfigError` 快速失败。
+准备好后，用 `Settings.apk_*` 字段指向它们，并放一份 `manifest.json`
+（格式见 `native_signer/README.md`，`files` 键按上表文件名/相对路径记录
+SHA-256）。`ApkNativeBridge.open()` 启动前逐项校验：**缺清单或指纹不符都会
+抛 `ConfigError` 拒绝启动**——清单不是可选的，否则校验等于没有。
 
 ## 运行要求（仅差分测试）
 

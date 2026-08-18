@@ -51,22 +51,28 @@ class ApkNativeBridge:
                 missing.append(f"asset {asset.relative_to(self.asset_dir)}: {asset}")
         if missing:
             raise ConfigError("APK native 资产缺失：" + "；".join(missing))
+        # sidecar 模式必须带 SHA-256 清单：官方库由使用者自行提取，没有清单就
+        # 无法确认这些二进制是预期版本——指纹校验若是"有清单才做"就等于没有。
         manifest_path = Path(self.command[3]).parent / "manifest.json"
-        if manifest_path.is_file():
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                expected = manifest.get("files", {})
-                paths = [Path(path) for path in self.command[3:]] + list(assets)
-                for path in paths:
-                    relative = (
-                        f"assets/{path.relative_to(self.asset_dir).as_posix()}"
-                        if path in assets else path.name
-                    )
-                    wanted = expected.get(relative)
-                    if wanted and hashlib.sha256(path.read_bytes()).hexdigest() != wanted:
-                        raise ConfigError(f"APK native 资产校验失败: {path}")
-            except (OSError, ValueError, TypeError) as exc:
-                raise ConfigError(f"无法校验 APK native 资产: {exc}") from exc
+        if not manifest_path.is_file():
+            raise ConfigError(
+                f"APK native 资产缺少 SHA-256 清单: {manifest_path}；"
+                "请按 vendor/apk_protocol/README.md 的提取步骤生成 manifest.json。"
+            )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            expected = manifest.get("files", {})
+            paths = [Path(path) for path in self.command[3:]] + list(assets)
+            for path in paths:
+                relative = (
+                    f"assets/{path.relative_to(self.asset_dir).as_posix()}"
+                    if path in assets else path.name
+                )
+                wanted = expected.get(relative)
+                if wanted and hashlib.sha256(path.read_bytes()).hexdigest() != wanted:
+                    raise ConfigError(f"APK native 资产校验失败: {path}")
+        except (OSError, ValueError, TypeError) as exc:
+            raise ConfigError(f"无法校验 APK native 资产: {exc}") from exc
 
     def open(self) -> None:
         with self._lock:

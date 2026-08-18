@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""端口（抽象接口，见 docs/architecture.md §6）。
+"""端口（抽象接口，见 docs/architecture.md「模块边界」）。
 
 用 Protocol 描述核心需要的外部能力；适配器实现它们。
 """
@@ -61,7 +61,7 @@ class Decoder(Protocol):
 
 @runtime_checkable
 class SignProvider(Protocol):
-    """生成受保护接口请求所需的 xm-sign（见 docs/architecture.md §7.1）。
+    """生成受保护接口请求所需的 xm-sign（见 docs/architecture.md「xm-sign」）。
 
     受保护接口（当前为 `/mobile-playpage/track/v3/baseInfo/{timestamp}`）要求请求头里带 `xm-sign`，
     形如 ``{cadd}&&{sid}``。该端口把"如何拿到 xm-sign"这一易变点隔离起来：

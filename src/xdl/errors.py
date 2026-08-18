@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""类型化异常体系（见 docs/architecture.md §10.1）。
+"""类型化异常体系（见 docs/architecture.md「错误模型」）。
 
 每个异常带 retryable 标志，未来任务引擎据此决定重试策略。
 当前 MVP 只用到其中一部分，但先把体系立起来，方便后续接入引擎。

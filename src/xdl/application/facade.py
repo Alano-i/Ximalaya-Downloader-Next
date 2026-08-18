@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""门面（库的公开 API，见 docs/architecture.md §11）。
+"""门面（库的公开 API，见 docs/architecture.md「模块边界」）。
 
 各前端（CLI / 未来 WebUI）只依赖这一层。公开方法保持**同步**签名，内部用
 asyncio 驱动异步解析/并发（`asyncio.run` 收口），前端零改动。

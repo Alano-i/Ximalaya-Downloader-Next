@@ -6,7 +6,8 @@
 - `libencrypt.so`：下载地址解密，downloadEncryptVersion 0/1/2；
 - `liblogin_encrypt.so`：登录签名 `sign` 与手机号/密码加密 `encryptMobile`。
 
-算法来源、反汇编证据与逐字节验证方法见 ``docs/apk-native-reimplementation.md``。
+算法常量与其反汇编来源见 ``xdl.config.apk``；逐字节验证方法见
+``tests/test_apk_native_py.py``（固定向量 + 可选的 sidecar 差分测试）。
 """
 from __future__ import annotations
 

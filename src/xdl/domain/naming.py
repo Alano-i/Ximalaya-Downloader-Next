@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""文件命名策略（见 docs/architecture.md §5）。
+"""文件命名策略（见 docs/architecture.md「模块边界」）。
 
 放在领域层，保证 CLI / 未来 WebUI 等各前端命名一致。
 """

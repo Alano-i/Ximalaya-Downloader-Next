@@ -23,8 +23,8 @@ cp target/native-signer.jar ../vendor/apk_protocol/native-signer.jar
 | `com.google.code.gson` | 2.13.1 | Apache-2.0 |
 | `org.slf4j:slf4j-nop` | 2.0.17 | MIT |
 
-仓库内随附的 `vendor/apk_protocol/native-signer.jar` 只包含上述开源依赖，
-不含任何喜马拉雅代码。
+JAR 是构建产物，**不入库**（`vendor/apk_protocol/` 只保留一份说明）。按上面的
+命令自建即可，产物只包含上述开源依赖，不含任何喜马拉雅代码。
 
 ## 重建后需要更新校验清单
 

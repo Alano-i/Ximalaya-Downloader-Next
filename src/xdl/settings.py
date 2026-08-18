@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""用户配置（见 docs/architecture.md §9）。
+"""用户配置（见 docs/architecture.md「配置与本地数据」）。
 
 与平台数据化配置（config/）隔离：这里是用户数据，升级不应覆盖。
 MVP 给保守默认值；环境变量/命令行覆盖等留待后续。

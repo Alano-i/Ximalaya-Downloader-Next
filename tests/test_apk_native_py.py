@@ -2,8 +2,8 @@
 """APK native 算法纯 Python 实现的契约与差分测试。
 
 固定向量部分不需要 Java 或 `.so`；末尾的差分测试在缺少 sidecar 时自动跳过。
-向量均由 vendor/apk_protocol 的 Unidbg sidecar 产出，见
-docs/apk-native-reimplementation.md。
+向量均由 vendor/apk_protocol 的 Unidbg sidecar 产出（准备方法见
+vendor/apk_protocol/README.md）。
 """
 from __future__ import annotations
 

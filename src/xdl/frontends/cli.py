@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""命令行前端（薄壳，见 docs/architecture.md §11）。
+"""命令行前端（薄壳，见 docs/architecture.md「模块边界」）。
 
 只负责参数解析与进度展示（实现 ProgressReporter），业务全部走 Facade。
 """

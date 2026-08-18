@@ -126,10 +126,16 @@ class WebRuntime:
     def login_status(self) -> dict:
         """当前后端的登录态。
 
-        换后端可能等于换了一套登录态，所以这里单独成一个查询：改设置之后调用方
-        必须重新问一次，不能沿用 bootstrap 时的快照。
+        登录体系按后端分家：apk 用独立账号库（不碰浏览器），其余后端共用浏览器
+        Cookie 缓存。所以换后端就等于换了一套登录态，调用方必须重新问一次。
         """
-        return login_cache_status(self._settings)
+        if self._settings.source_backend != "apk":
+            return login_cache_status(self._settings)
+        login = self._facade.auth_status()
+        return {**login, "browser": "", "browser_name": "APK",
+                "cache_exists": bool(login.get("authenticated")),
+                "profile_exists": True,
+                "other_browser_authenticated": None}
 
     def bootstrap(self) -> dict:
         tasks = self.tasks_snapshot()
@@ -246,6 +252,41 @@ class WebRuntime:
                 )
             detail = self._facade.logout()
         return {"detail": detail, "login": self.login_status()}
+
+    def apk_auth_status(self) -> dict:
+        return self._facade.auth_status()
+
+    def apk_login_config(self) -> dict:
+        return self._facade.login_config()
+
+    def apk_send_sms(self, mobile: str, fds_otp: dict) -> dict:
+        return self._facade.send_login_sms(mobile, fds_otp)
+
+    def apk_verify_sms(self, code: str) -> dict:
+        return self._apk_auth_mutation(self._facade.verify_login_sms, code)
+
+    def apk_login_password(self, account: str, password: str, mode: str,
+                           fds_otp: dict) -> dict:
+        return self._apk_auth_mutation(
+            self._facade.login_password, account, password, mode, fds_otp,
+        )
+
+    def apk_logout(self) -> dict:
+        return self._apk_auth_mutation(self._facade.logout)
+
+    def apk_switch_account(self, uid: str) -> dict:
+        return self._apk_auth_mutation(self._facade.switch_account, uid)
+
+    def apk_delete_account(self, uid: str) -> dict:
+        return self._apk_auth_mutation(self._facade.delete_account, uid)
+
+    def _apk_auth_mutation(self, method: Callable, *args) -> dict:
+        with self._lock:
+            if self._operation and self._operation["status"] == "running":
+                raise OperationBusyError(
+                    "有下载或恢复操作正在运行，请停止或等待完成后再切换 APK 账号。"
+                )
+            return method(*args)
 
     def start_download(self, *, mode: str, target: str,
                        quality: str | None = None,

@@ -182,7 +182,7 @@ def test_apk_resume_requeues_existing_auth_failures_when_already_logged_in(monke
 
     assert app.resume(reporter=reporter) == []
     assert store.categories == ["auth"]
-    assert reporter.messages == ["APK 已登录，已恢复 2 个鉴权失败任务。"]
+    assert reporter.messages == ["已登录，已恢复 2 个鉴权失败任务。"]
 
 
 def test_track_tolerates_broken_store(tmp_path):

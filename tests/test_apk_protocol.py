@@ -551,6 +551,24 @@ def test_apk_facade_composition_is_isolated(tmp_path):
         app.close()
 
 
+def test_facade_close_releases_source_via_port_not_internals(tmp_path):
+    """Facade.close 必须经 SynchronouslyClosableSource 端口释放连接，而不是
+    伸手进适配器的 .client——应用层不该知道适配器的内部结构。"""
+    client = ApkClient(FakeBridge(), ApkStateStore(str(tmp_path / "state")))
+    source = ApkSource(client)
+    app = Facade(source, RecordingSink(),
+                 Settings(source_backend="apk",
+                          task_db_path=str(tmp_path / "tasks.db")))
+
+    closed = {"sync": 0}
+    original = client.close
+    client.close = lambda: (closed.update(sync=closed["sync"] + 1), original())[1]
+
+    app.close()
+
+    assert closed["sync"] == 1
+
+
 def test_apk_source_records_risk_events_for_pages_and_tracks(tmp_path):
     """专辑下载的每一次受保护调用都要落进观测：清单页 + 每集解析。"""
     log = tmp_path / "risk.jsonl"

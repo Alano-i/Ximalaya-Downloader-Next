@@ -99,6 +99,18 @@ class QualityAwareSource(Protocol):
 
 
 @runtime_checkable
+class SynchronouslyClosableSource(Protocol):
+    """可同步释放底层长连接能力的音源（可选能力）。
+
+    Facade 的 ``close()`` 是同步的（供常驻前端重载配置/关闭进程），无法 await
+    音源的异步 ``close()``。持有长驻连接（如 APK 的 HTTP 会话）的音源实现此
+    端口，让 Facade 不必伸手进适配器内部结构（``.client.close()``）——那是
+    Message Chain，破坏了"应用层只依赖端口"的约束。
+    """
+    def close_sync(self) -> None: ...
+
+
+@runtime_checkable
 class MediaSink(Protocol):
     """输出：把 URL 落盘（含进度回报、原子落盘）。"""
     def write(self, url: str, target_path: str, reporter: "ProgressReporter",

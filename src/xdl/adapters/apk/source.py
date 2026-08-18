@@ -61,6 +61,11 @@ class ApkSource:
     async def close(self) -> None:
         await asyncio.to_thread(self.client.close)
 
+    def close_sync(self) -> None:
+        """SynchronouslyClosableSource 端口：Facade 的同步 close() 经此释放
+        client 的长驻连接，无需伸手进适配器内部（.client.close()）。"""
+        self.client.close()
+
     async def get_track(self, track_id: str) -> Track:
         return await self.get_track_for_quality(track_id, Quality.STANDARD)
 

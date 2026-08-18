@@ -51,6 +51,12 @@ class RefreshCookiesRequest(StrictModel):
     headless: bool = True
 
 
+class LoginRequest(StrictModel):
+    # 换账号：先清掉现有凭据再开浏览器。不清的话 Profile 里的旧 token 会让
+    # 登录轮询秒命中，浏览器一闪即关，存下来的还是同一个账号。
+    switch_account: bool = False
+
+
 class OpenDownloadsRequest(StrictModel):
     task_id: int | None = None
 
@@ -192,8 +198,14 @@ def create_app(runtime: WebRuntime | None = None) -> FastAPI:
         return service.risk_report()
 
     @app.post("/api/operations/login", status_code=202)
-    def login():
-        return service.start_login()
+    def login(body: LoginRequest | None = None):
+        return service.start_login(
+            switch_account=bool(body and body.switch_account))
+
+    @app.post("/api/auth/logout")
+    def logout():
+        """清除当前后端的登录态（浏览器 Cookie 缓存 + 专用 Profile）。"""
+        return service.logout()
 
     @app.post("/api/operations/download", status_code=202)
     def download(body: DownloadRequest):
@@ -239,7 +251,10 @@ def create_app(runtime: WebRuntime | None = None) -> FastAPI:
     @app.put("/api/settings")
     def update_settings(body: SettingsUpdate):
         changes = body.model_dump(exclude_unset=True, exclude_none=True)
-        return {"settings": service.update_settings(changes)}
+        settings = service.update_settings(changes)
+        # 顺带回传登录态：改 source_backend 会整套换掉登录体系，前端若继续沿用
+        # 保存前的 login，头部就会一直显示上一个后端的登录信息。
+        return {"settings": settings, "login": service.login_status()}
 
     @app.post("/api/open-downloads")
     def open_downloads(body: OpenDownloadsRequest):

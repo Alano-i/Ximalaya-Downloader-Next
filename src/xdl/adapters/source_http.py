@@ -28,7 +28,8 @@ from ..errors import (ApiError, AuthError, ConfigError, NetworkError,
                       RiskControlError, SignError)
 from ..ports import Decoder, SignProvider
 from ..risk import RiskEventRecorder
-from .sign.cookies import (build_cookie_header, extract_cookies_from_profile,
+from .sign.cookies import (build_cookie_header, clear_cookie_cache,
+                           extract_cookies_from_profile,
                            load_cached_cookies, save_cookies, is_login_cookie,
                            login_cookies_only, strip_device_cookies)
 from .sign.extractor import (compare_device_identities, count_device_cookies,
@@ -676,7 +677,7 @@ class HttpSource:
         return await asyncio.to_thread(_fetch_album_list, str(album_id))
 
     # ---- 与音源后端无关的命令（委托给 ChromeSource 兜底） ----
-    def interactive_login(self) -> str:
+    def interactive_login(self, **wait_options) -> str:
         """打开浏览器完成登录、保存到专用 Profile（共用 `xdl login` 流程）。
 
         登录态与音源后端无关：HttpSource 只是从这个 Profile 提取登录 Cookie
@@ -688,7 +689,12 @@ class HttpSource:
             raise ConfigError(
                 "未配置 chrome_fallback；无法在纯 HTTP 后端下交互登录。"
                 "请确认装配根注入了 ChromeSource（见 composition.build_facade）。")
-        path = self._chrome_fallback.interactive_login()
+        # ChromeSource 的登录总是先清专用 Profile（见其实现 docstring），这里只需
+        # 额外清掉 Cookie 缓存——只清一个都会被旧账号顶回来：清了 Profile 不清缓存，
+        # 下次 open() 会从缓存重新装回旧会话。
+        wait_options.pop("reset", None)  # 向后兼容旧调用方；行为上已无差异
+        clear_cookie_cache(self._cookies_cache_path)
+        path = self._chrome_fallback.interactive_login(**wait_options)
         # Cookie 已在登录浏览器仍存活时捕获。这里绝不能为导出而重启 Profile：
         # Playwright 的测试用 Keychain 参数与系统浏览器不同，会在 macOS 上清掉
         # 无法解密的 Cookie；会话 Cookie 即使加密兼容也未必能跨重启恢复。
@@ -704,6 +710,21 @@ class HttpSource:
         self._install_cookies(cookies, strip_device=self._experiment_strip_cookies)
         self._collect_device_info_if_missing()
         return path
+
+    def logout(self) -> dict:
+        """清掉本地登录凭据：Cookie 缓存 + 专用 Profile + 内存副本。
+
+        三处缺一不可——只删缓存文件，下次 open() 会从 Profile 重新导出同一个
+        账号；只删 Profile，内存里的 Cookie 头还在本进程里继续用。
+        """
+        removed_cache = clear_cookie_cache(self._cookies_cache_path)
+        profile = ({} if self._chrome_fallback is None
+                   else self._chrome_fallback.logout())
+        self._cookies = []
+        self._cookie_header = ""
+        self._authenticated = False
+        return {"cookie_cache_removed": removed_cache,
+                "cookie_cache_path": self._cookies_cache_path, **profile}
 
     def _collect_device_info_if_missing(self) -> None:
         """登录后补齐该浏览器的设备指纹（仅在缺失时采集，不覆盖已有文件）。
@@ -784,6 +805,7 @@ class HttpSource:
                 request_index=request_index,
                 started_at=started_at,
                 authenticated=self._authenticated,
+                backend="http",
                 device_fingerprint_reset=self._device_fingerprint_was_reset,
             )
         except OSError:

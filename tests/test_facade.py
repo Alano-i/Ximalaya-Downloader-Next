@@ -17,7 +17,8 @@ class FakeSource:
         self.track = track
         self.error = error
 
-    def interactive_login(self):
+    def interactive_login(self, *, reset=False, cancel=None, notify=None):
+        self.login_wait = {"reset": reset, "cancel": cancel, "notify": notify}
         return "/tmp/xdl-profile"
 
     async def open(self):

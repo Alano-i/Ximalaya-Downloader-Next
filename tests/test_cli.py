@@ -213,7 +213,7 @@ def test_main_help_focuses_on_normal_user_flow(capsys):
 
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "{web,login,track,album,resume,gen-sign,risk-report}" in output
+    assert "{web,login,logout,track,album,resume,gen-sign,risk-report}" in output
     assert "启动本地 WebUI" in output
     assert "extract-device" not in output
     assert "refresh-cookies" not in output

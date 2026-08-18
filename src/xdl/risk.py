@@ -46,6 +46,7 @@ class RiskEventRecorder:
                 request_index: int | None = None,
                 started_at: str | None = None,
                 authenticated: bool | None = None,
+                backend: str | None = None,
                 device_fingerprint_reset: bool | None = None) -> None:
         event = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -56,6 +57,10 @@ class RiskEventRecorder:
             "msg": msg,
             "in_flight": int(in_flight),
         }
+        # 各后端打的是完全不同的接口，风控额度也各算各的。不标后端，日志混在
+        # 一起就再也分不出"这条限流是 APK 的还是 PC 的"。
+        if backend is not None:
+            event["backend"] = str(backend)
         if session_id is not None:
             event["session_id"] = str(session_id)
         if request_index is not None:

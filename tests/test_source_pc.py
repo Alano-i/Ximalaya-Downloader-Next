@@ -419,3 +419,42 @@ def test_http_get_raises_network_error_when_both_fail(monkeypatch):
     with pytest.raises(NetworkError) as exc:
         src._http_get("https://pc.ximalaya.com/x", {}, {})
     assert exc.value.retryable is True
+
+
+def test_risk_events_are_actually_written_and_tagged(tmp_path):
+    """PC 后端必须真的把观测落盘，并标上 backend。
+
+    回归钉子：`_record` 曾经传 `message=`，而 `RiskEventRecorder.record()` 的参数
+    叫 `msg` —— 每次调用都抛 TypeError，又被 `except Exception: pass` 吞掉，于是
+    PC 后端从头到尾一条事件都没记过，风控日志里全是 HTTP 时期的数据。参数名写错
+    是静默的，只有断言"文件里确实出现了这条事件"才拦得住。
+    """
+    from xdl.risk import RiskEventRecorder
+
+    log = tmp_path / "risk.jsonl"
+    src = PcHttpSource(impersonate="", risk_recorder=RiskEventRecorder(str(log)))
+    src._authenticated = True
+
+    src._record("123", 0.0, "success", None, None, 1)
+    src._record("124", 0.0, "risk_control", 1001, "系统繁忙，请稍后再试!", 2)
+    src._record_album("77", "api_error", 500, "boom")
+
+    rows = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
+    assert [r["track_id"] for r in rows] == ["123", "124", "album:77"]
+    assert [r["outcome"] for r in rows] == ["success", "risk_control", "api_error"]
+    assert {r["backend"] for r in rows} == {"pc"}
+    assert rows[1]["ret"] == 1001
+    assert rows[1]["msg"] == "系统繁忙，请稍后再试!"
+    assert rows[0]["authenticated"] is True
+    assert len({r["session_id"] for r in rows}) == 1
+
+
+def test_record_surfaces_signature_errors_instead_of_swallowing(tmp_path):
+    """观测层只允许吞写盘失败；调用约定不匹配必须炸出来。"""
+    class PickyRecorder:
+        def record(self, **kwargs):
+            raise TypeError("record() got an unexpected keyword argument")
+
+    src = PcHttpSource(impersonate="", risk_recorder=PickyRecorder())
+    with pytest.raises(TypeError):
+        src._record("123", 0.0, "success", None, None, 1)

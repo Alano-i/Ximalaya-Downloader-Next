@@ -264,6 +264,19 @@ def save_cookies(cookies: list[dict], path: str) -> None:
             os.unlink(temp_path)
 
 
+def clear_cookie_cache(path: str) -> bool:
+    """删除 Cookie 缓存文件；本来就不存在时返回 False 而不是报错。"""
+    if not path:
+        return False
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return False
+    except IsADirectoryError as exc:
+        raise ValueError(f"cookies_cache_path 指向目录，拒绝删除: {path}") from exc
+    return True
+
+
 def load_cached_cookies(path: str, max_age_seconds: int = 1800) -> list[dict] | None:
     """若缓存文件存在且足够新鲜则返回内容，否则返回 None。"""
     if not os.path.exists(path):

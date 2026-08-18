@@ -65,6 +65,19 @@ def _cmd_login(app: Facade, args) -> int:
     return 0
 
 
+def _cmd_logout(app: Facade, args) -> int:
+    """清除本机保存的登录凭据；换账号 = 先登出再重新登录。"""
+    detail = app.logout()
+    removed = [label for key, label in (
+        ("cookie_cache_removed", "Cookie 缓存"),
+        ("profile_removed", "专用浏览器 Profile"),
+    ) if detail.get(key)]
+    print("已登出：" + ("已清除 " + "、".join(removed) if removed
+                       else "本机没有可清除的登录凭据"))
+    print("如需登录另一个账号，请重新运行 `xdl login`。")
+    return 0
+
+
 def _maybe_print_browser_hint(args) -> None:
     """双浏览器机器且未显式选择时提示如何切换（浏览器选择只在登录时与用户相关）。"""
     if getattr(args, "browser", None):
@@ -287,7 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(
         dest="command", required=True,
-        metavar="{web,login,track,album,resume,gen-sign,risk-report}",
+        metavar="{web,login,logout,track,album,resume,gen-sign,risk-report}",
     )
 
     p_web = sub.add_parser("web", help="启动本地 WebUI")
@@ -298,6 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--no-open", action="store_true",
                        help="启动后不自动打开浏览器")
     sub.add_parser("login", help="打开浏览器登录并保存会话")
+    sub.add_parser("logout", help="清除本机保存的登录凭据（换账号：先登出再登录）")
     p_track = sub.add_parser("track", help="下载单个音频")
     p_track.add_argument("target", help="音频链接或 trackId")
     p_track.add_argument("--quality", choices=["high", "standard", "low"],
@@ -390,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "web": _cmd_web,
         "login": _cmd_login,
+        "logout": _cmd_logout,
         "track": _cmd_track,
         "album": _cmd_album,
         "resume": _cmd_resume,
@@ -402,7 +417,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # 本地诊断命令不需要装配下载器，避免无谓初始化 Chrome/任务库/HTTP 后端。
         app = (Facade.from_config(settings)
-               if args.command in {"login", "track", "album", "resume", "inspect"}
+               if args.command in {"login", "logout", "track", "album", "resume",
+                                   "inspect"}
                else None)
         return handlers[args.command](app, args)
     except CancelledByUser as e:

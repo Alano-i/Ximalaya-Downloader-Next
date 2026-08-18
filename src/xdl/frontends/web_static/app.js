@@ -83,11 +83,44 @@ async function api(path, options = {}) {
 }
 
 function toast(message, type = "success") {
+  const region = $("#toast-region");
   const node = document.createElement("div");
   node.className = `toast${type === "error" ? " is-error" : ""}`;
   node.textContent = message;
-  $("#toast-region").append(node);
-  window.setTimeout(() => node.remove(), 4200);
+  region.append(node);
+  // top layer 按进入顺序叠放，所以每条提示都重新 show 一次，才能盖住在它之前
+  // 用 showModal() 打开的确认弹窗。不支持 popover 的浏览器退回 z-index。
+  raiseToastRegion();
+  window.setTimeout(() => {
+    node.remove();
+    if (!region.childElementCount) hideToastRegion();
+  }, 4200);
+}
+
+function raiseToastRegion() {
+  hideToastRegion();
+  try {
+    $("#toast-region").showPopover();
+  } catch { /* 浏览器不支持 popover：保持普通定位 */ }
+}
+
+function hideToastRegion() {
+  try {
+    $("#toast-region").hidePopover();
+  } catch { /* 本来就没展示，或不支持 popover */ }
+}
+
+function openLogin() {
+  // 登录总是先清掉专用 Profile 再开浏览器（见后端 interactive_login），所以
+  // 已登录状态下这里没有"再登录一次"的入口——想换号请先登出。
+  startOperation("/api/operations/login");
+}
+
+// 唯一的登录/登出入口：未登录→登录；已登录→登出确认。想换账号就走
+// 登出（清凭据）→ 再登录（重开浏览器）两步。
+function onLoginEntry() {
+  if (state.login?.authenticated) return confirmLogout();
+  openLogin();
 }
 
 function switchView(view) {
@@ -136,16 +169,18 @@ function setDownloadMode(mode) {
 function renderHeader() {
   const loginButton = $("#login-status");
   const loginText = $("#login-status-text");
+  const backend = state.settings?.source_backend || "http";
   // 登录态按浏览器分家，所以状态里必须带上"是哪个浏览器"，否则用户切换浏览器后
   // 只会看到莫名其妙的"尚未登录"。
   const browserName = state.login?.browser_name || "";
   const prefix = browserName ? `${browserName} · ` : "";
+  renderLoginEntry(browserName);
   const other = state.login?.other_browser_authenticated;
   const otherName = other === "edge" ? "Edge" : other === "chrome" ? "Chrome" : "";
   if (state.login?.authenticated) {
     loginText.textContent = `${prefix}已保存登录态`;
     loginButton.classList.remove("is-warning");
-    loginButton.title = "点击重新登录";
+    loginButton.title = "点击登出";
   } else if (otherName) {
     loginText.textContent = `${prefix}尚未登录`;
     loginButton.classList.add("is-warning");
@@ -160,12 +195,58 @@ function renderHeader() {
     loginButton.classList.add("is-warning");
     loginButton.title = "点击打开浏览器登录";
   }
-  const backend = state.settings?.source_backend || "http";
   $("#backend-status").textContent =
     backend === "pc" ? "PC 桌面端接口" : backend === "http" ? "HTTP 后端" : "浏览器后端";
   $("#concurrency-status").textContent = `并发 ${state.settings?.max_concurrency ?? 1}`;
   if (state.settings?.default_quality) {
     $("#download-quality").value = state.settings.default_quality;
+  }
+}
+
+// 登录入口只有一个按钮，跟着登录态走：未登录显示"登录"，已登录显示"登出"。
+// 想换账号 = 登出（清凭据）→ 登录（重开浏览器）两步，没有独立的"换账号"动作。
+function renderLoginEntry(browserName) {
+  const button = $("#login-entry-button");
+  if (!button) return;
+  const authenticated = Boolean(state.login?.authenticated);
+  const name = browserName || "浏览器";
+  button.textContent = authenticated ? "登出" : `${name} 登录`;
+  button.title = authenticated
+    ? `清除本机保存的登录凭据（Cookie 缓存与 ${name} 专用 Profile）`
+    : `下载前请先在 ${name} 中登录喜马拉雅`;
+  button.classList.toggle("is-warning", !authenticated);
+}
+
+function confirmLogout() {
+  const browserName = state.login?.browser_name || "浏览器";
+  openDialog({
+    title: "登出当前账号",
+    sub: "将删除本机保存的登录凭据，之后需要重新登录才能下载。",
+    lines: [
+      `<div class="line"><i></i><span>删除 Cookie 缓存 <strong>${
+        escapeHtml(state.settings?.cookies_cache_path || "")}</strong></span></div>`,
+      `<div class="line"><i></i><span>删除 ${escapeHtml(browserName)} 专用 Profile <strong>${
+        escapeHtml(state.settings?.chrome_profile_dir || "")}</strong></span></div>`,
+      `<div class="line"><i></i><span>设备指纹文件 <strong>${
+        escapeHtml(state.settings?.device_info_path || "")
+      }</strong> 不受影响，仍是同一台设备</span></div>`,
+    ],
+    // Profile 必须一起删：只删 Cookie 缓存的话，浏览器里旧账号的会话还在，
+    // 下次登录会被自动登回同一个账号，等于换不了号。
+    safeNote: "只影响 XDL 自己的专用 Profile，不会动你日常使用的浏览器。",
+    confirmText: "确认登出",
+    onConfirm: doLogout,
+  });
+}
+
+async function doLogout() {
+  try {
+    const result = await api("/api/auth/logout", { method: "POST" });
+    state.login = result.login;
+    renderHeader();
+    toast("已登出，登录凭据已清除");
+  } catch (error) {
+    toast(error.message, "error");
   }
 }
 
@@ -394,7 +475,13 @@ function renderOperation() {
   };
   $("#operation-state").textContent = statusLabels[operation.status] || operation.status;
   $("#operation-title").textContent = operation.current_title || operation.label || operationLabels[operation.kind] || "后台操作";
-  $("#operation-message").textContent = operation.message || operationLabels[operation.kind] || "正在准备";
+  // 运行中 message 还是空的，此时最新一条 note 才是有用信息（例如登录在等什么）；
+  // 否则用户在等待期间只会看到一个干巴巴的"登录"。
+  const notes = operation.notes || [];
+  const lastNote = notes.length ? notes[notes.length - 1].message : "";
+  $("#operation-message").textContent = operation.message
+    || (operation.status === "running" ? lastNote : "")
+    || operationLabels[operation.kind] || "正在准备";
   const total = Number(operation.progress_total || 0);
   const done = Number(operation.progress_done || 0);
   const percent = total > 0 ? Math.min(100, Math.floor((done / total) * 100)) : 0;
@@ -671,8 +758,11 @@ async function requeuePicked() {
 function openDialog({ title, sub, lines, confirmText, onConfirm }) {
   const root = $("#dialog-root");
   const previous = document.activeElement;
+  // 必须是原生 <dialog> + showModal()：它在浏览器 top layer 里，普通元素再高
+  // 的 z-index 也压不住；而且 showModal()
+  // 会把文档其余部分置为 inert，普通遮罩即便看得见也点不动。
   root.innerHTML = `
-    <div class="scrim" role="dialog" aria-modal="true" aria-label="${title}">
+    <dialog class="scrim" aria-label="${title}">
       <div class="dialog">
         <h2>${title}</h2>
         ${sub ? `<p class="dialog-sub">${sub}</p>` : ""}
@@ -686,24 +776,26 @@ function openDialog({ title, sub, lines, confirmText, onConfirm }) {
           <button class="button danger" type="button" data-dialog="confirm">${confirmText}</button>
         </div>
       </div>
-    </div>`;
+    </dialog>`;
 
+  const scrim = root.querySelector("dialog");
   const close = () => {
+    if (scrim.open) scrim.close();
     root.innerHTML = "";
-    document.removeEventListener("keydown", onKey, true);
     if (previous?.isConnected) previous.focus();
   };
-  const onKey = (event) => {
-    if (event.key === "Escape") {
-      event.stopPropagation();
-      close();
-    }
-  };
-  document.addEventListener("keydown", onKey, true);
+  scrim.showModal();
+  // Esc 由原生 cancel 事件送来，且只关最上层那个 dialog；自己收尾以便还原焦点
+  scrim.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    close();
+  });
   // 默认焦点落在取消：回车不该等于确认删除
   root.querySelector('[data-dialog="cancel"]').focus();
-  root.addEventListener("click", (event) => {
-    if (event.target.classList.contains("scrim")) return close();
+  // 监听挂在 scrim 上而不是常驻的 root 上：挂 root 会逐次累积，关掉的旧弹窗
+  // 仍会接到新弹窗的点击，把上一次的 onConfirm 又跑一遍。
+  scrim.addEventListener("click", (event) => {
+    if (event.target === scrim) return close();
     const button = event.target.closest("[data-dialog]");
     if (!button) return;
     close();
@@ -907,6 +999,9 @@ async function saveSettings() {
       body: JSON.stringify(settingsPayload()),
     });
     state.settings = result.settings;
+    // 换后端/换浏览器等于换一套登录体系，登录态必须跟着换；只更新 settings 会让
+    // 头部继续显示上一套凭据的状态（例如切到另一个浏览器后仍写着已登录）。
+    if (result.login) state.login = result.login;
     renderHeader();
     populateSettingsForm();
     toast("设置已保存，运行器已重新加载");
@@ -963,7 +1058,9 @@ document.addEventListener("click", (event) => {
   if (!action) return;
   const actions = {
     "focus-composer": focusComposer,
-    login: () => startOperation("/api/operations/login"),
+    login: openLogin,
+    "login-entry": onLoginEntry,
+    logout: confirmLogout,
     resume: () => startOperation("/api/operations/resume"),
     stop: stopOperation,
     "open-downloads": () => openDownloads(),

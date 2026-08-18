@@ -46,7 +46,7 @@
       <button class="mobile-brand" type="button" data-view="tasks">XDL</button>
       <div class="topbar-spacer"></div>
       <div class="status-cluster">
-        <button class="status-button" id="login-status" type="button" data-action="login">
+        <button class="status-button" id="login-status" type="button" data-action="login-entry">
           <span class="status-dot" aria-hidden="true"></span>
           <span id="login-status-text">正在检查登录态</span>
         </button>
@@ -65,6 +65,10 @@
             <p class="page-description">添加你有权访问的专辑或单曲，进度会自动保存。</p>
           </div>
           <div class="heading-actions">
+            <button class="button secondary" id="login-entry-button" type="button"
+                    data-action="login-entry">
+              登录
+            </button>
             <button class="button secondary" type="button" data-action="open-downloads">
               打开下载目录
             </button>
@@ -437,7 +441,8 @@
     </form>
   </dialog>
 
-  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <div class="toast-region" id="toast-region" popover="manual"
+       aria-live="polite" aria-atomic="true"></div>
   <div id="dialog-root"></div>
   <script type="module" src="/app.js"></script>
 </body>

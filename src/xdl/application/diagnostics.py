@@ -101,7 +101,13 @@ def _other_browser_with_login(settings: Settings, current: str) -> str | None:
 
 
 def login_cache_status(settings: Settings) -> dict:
-    """报告**当前浏览器**的本地登录缓存状态，不暴露 Cookie 名或值。"""
+    """报告**当前浏览器**的本地登录状态，不暴露 Cookie 名或值。
+
+    登录态的存放位置按后端分家：http/pc 登录后把 Cookie 拷进缓存文件；chrome
+    后端从头到尾只依赖专用 Profile 的 Cookie DB（不写缓存文件）。所以
+    ``authenticated`` 必须按后端分别检查，否则 chrome 后端会恒报未登录——
+    前端据此藏起登出入口、把"换账号"走成普通登录，旧账号被静默续存。
+    """
     path = settings.cookies_cache_path
     exists = os.path.isfile(path)
     age_seconds = None
@@ -112,10 +118,16 @@ def login_cache_status(settings: Settings) -> dict:
         except OSError:
             age_seconds = None
     current = _resolved_browser(settings)
+    if settings.source_backend == "chrome":
+        # 延迟导入：diagnostics 是应用层模块，不能在导入期就拉上浏览器适配器。
+        from ..adapters.source_chrome import _has_persisted_login_cookie
+        authenticated = _has_persisted_login_cookie(settings.chrome_profile_dir)
+    else:
+        authenticated = _has_login_cache(path)
     return {
         "browser": current,
         "browser_name": platform.browser_display_name(current),
-        "authenticated": _has_login_cache(path),
+        "authenticated": authenticated,
         "cache_exists": exists,
         "cache_age_seconds": age_seconds,
         "profile_exists": os.path.isdir(settings.chrome_profile_dir),

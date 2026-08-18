@@ -327,6 +327,8 @@ h3 {
 
 .heading-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 9px;
 }
 
@@ -370,6 +372,19 @@ h3 {
   border-color: #9caab5;
   color: var(--ink);
   background: #fbfcfd;
+}
+
+/* 未登录的登录入口：跟顶栏状态点用同一个橙色，两处才像在说同一件事 */
+.button.secondary.is-warning {
+  border-color: #f0b9a8;
+  color: var(--orange);
+  background: var(--orange-soft);
+}
+
+.button.secondary.is-warning:hover:not(:disabled) {
+  border-color: var(--orange);
+  color: var(--orange-hover);
+  background: #ffe6dd;
 }
 
 .button.danger-subtle {
@@ -1032,15 +1047,34 @@ input::placeholder {
 
 /* ---------- 确认弹窗 ---------- */
 
+/* 确认弹窗是原生 <dialog> + showModal()：modal 待在
+   浏览器 top layer 里，普通 z-index 无论多大都盖不过去。下面这些属性是在复位
+   <dialog> 的 UA 默认样式（居中 margin、fit-content 尺寸、边框、背景）。 */
 .scrim {
   position: fixed;
   z-index: 200;
   display: grid;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
   padding: 24px;
+  border: 0;
+  color: inherit;
   background: rgba(23, 33, 43, 0.38);
   inset: 0;
   place-items: center;
   animation: scrim-in 130ms ease both;
+}
+
+.scrim:not([open]) {
+  display: none;
+}
+
+/* 遮罩由 .scrim 自身画，原生 backdrop 再叠一层只会更暗 */
+.scrim::backdrop {
+  background: transparent;
 }
 
 @keyframes scrim-in {
@@ -1652,13 +1686,22 @@ input::placeholder {
   line-height: 1.7;
 }
 
+/* 同理：提示要压在 modal 之上，靠 popover 进 top layer。这里同样在复位
+   [popover] 的 UA 默认样式；浏览器不支持时退回 z-index，位置样式不变。 */
 .toast-region {
   position: fixed;
-  right: 22px;
-  bottom: 22px;
   z-index: 100;
   display: grid;
   width: min(360px, calc(100vw - 32px));
+  height: auto;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  color: inherit;
+  background: none;
+  inset: auto 22px 22px auto;
   gap: 9px;
 }
 

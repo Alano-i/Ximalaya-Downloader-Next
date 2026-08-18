@@ -130,7 +130,10 @@ async def _await_risk_recovery(source: Source, probe_track_ids: list[str],
             probe_id = candidates[0]
             try:
                 await source.get_track(probe_id)
-                waited = time.monotonic() - started
+                # 首次探针且没有配置等待时，实际并没有"等"过；此时把探针自身的
+                # 耗时算成等待时长，会让 risk_wait_seconds 变成一个非零的噪声值。
+                waited = (0.0 if policy.initial_wait <= 0 and attempt == 1
+                          else time.monotonic() - started)
                 _note(reporter, f"  ✓ {label}风控已解除"
                                 f"（等待 {waited:.0f}s），继续下载。")
                 return True, waited

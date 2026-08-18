@@ -132,9 +132,11 @@ class WebRuntime:
         if self._settings.source_backend != "apk":
             return login_cache_status(self._settings)
         login = self._facade.auth_status()
+        # 对 apk 而言"profile"是账号库：profile_exists 表示库里是否已存过账号
+        # （哪怕当前未登录），而不是恒真——否则前端永远显示不出"尚未登录"之外的态。
         return {**login, "browser": "", "browser_name": "APK",
                 "cache_exists": bool(login.get("authenticated")),
-                "profile_exists": True,
+                "profile_exists": bool(login.get("accounts")),
                 "other_browser_authenticated": None}
 
     def bootstrap(self) -> dict:

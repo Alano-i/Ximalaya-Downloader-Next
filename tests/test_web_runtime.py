@@ -273,10 +273,23 @@ def test_runtime_login_status_follows_source_backend(tmp_path):
     assert apk_login["browser_name"] == "APK"
     assert apk_login["authenticated"] is True
     assert apk_login["accounts"] == [{"uid": "100", "active": True}]
+    # 账号库里有已存账号 → profile_exists 为真
+    assert apk_login["profile_exists"] is True
     # pc 后端不看 APK 账号库，tmp_path 下没有 Cookie 缓存文件即未登录
     assert browser_login["browser_name"] != "APK"
     assert browser_login["authenticated"] is False
     assert "accounts" not in browser_login
+
+
+def test_runtime_apk_profile_exists_is_false_without_accounts(tmp_path):
+    """apk 的 profile_exists 语义是"账号库里有已存账号"，不能恒为 True。"""
+    facade = FakeFacade()
+    facade.auth_status = lambda: {"backend": "apk", "authenticated": False,
+                                  "accounts": []}
+    runtime = WebRuntime(replace(_settings(tmp_path), source_backend="apk"),
+                         facade=facade, persist_settings=False)
+
+    assert runtime.login_status()["profile_exists"] is False
 
 
 def test_runtime_forwards_apk_password_login(tmp_path):

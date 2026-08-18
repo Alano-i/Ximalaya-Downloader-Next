@@ -48,11 +48,13 @@ WebUI 在 `frontends` 内进一步分成三层：FastAPI 只负责输入校验�
 
 ### 3.5 APK 协议可选音源
 
-`source_backend=apk` 装配独立的 `ApkSource + ApkMediaSink`。APK 登录、设备身份、XUID、`x-tk` 和下载 URL 解密由 Java/Unidbg sidecar 提供，运行数据位于 `~/.xdl/apk/`，与浏览器身份完全隔离。
+`source_backend=apk` 装配独立的 `ApkSource + ApkMediaSink`。运行数据位于 `~/.xdl/apk/`，与浏览器身份完全隔离。
+
+APK 协议的 native 算法（`create_xuid`、`ticket`/`x-tk`、登录参数 `sign`、`encryptMobile`、`decryptDownload` v0/1/2）已用纯 Python 还原在 `adapters/apk/native_py.py`，默认走这条路径（`ApkNativeBridge(prefer_python=True)`），**运行时不启动任何 Java 进程、也不需要 `.so` 资产**。常量集中在 `config/apk.py`，每条标注了反汇编地址以便审计。
+
+`prefer_python=False` 的 Java/Unidbg sidecar 路径保留下来，仅用于协议升级时与官方 `.so` 做差分比对：官方库由使用者自行从已授权安装的 APK 提取（清单与比对用 SHA-256 见 `vendor/apk_protocol/README.md`），`native_signer/` 的 Java 源码可 `mvn package` 自建。sidecar 模式启动前会校验资产清单与 SHA-256；缺清单或指纹不符即拒绝启动。
 
 APK 下载清单只用于取得授权 trackId 和元数据；每个待下载 track 都通过 `mobile/download/v2/track/{trackId}` 单独获取本次连接。用例通过可选 `QualityAwareSource`/`TrackResolvingMediaSink` capability 分派进入 APK 路径，原 HTTP、PC 和 Chrome Source 以及 `FileSink` 的调用保持不变。APK sink 为 CDN 添加 `requestType: download`，恢复 `.part` 前重新解析连接，连接失效时最多刷新一次。
-
-native bundle 与 APK 版本绑定，启动时校验清单和 SHA-256；只有选择 APK 后端才会检查 Java/资产并启动 sidecar。
 
 ### 3.1 登录态
 

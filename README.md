@@ -184,7 +184,7 @@ APK 整专下载会先取得授权曲目清单，然后对每一集分别生成 
 | `edge-profile/` `edge-cookies.json` `edge-device-info.json` | 同上，Edge 身份（选用 Edge 时） |
 | `tasks.db` | 下载任务、进度和恢复状态 |
 | `risk-events.jsonl` | 最小化请求结果观测（供 `risk-report`），不含 Cookie 或播放 URL |
-| `apk/device.json` `apk/xuid.json` `apk/auth.json` | APK 独立设备身份与登录态；`auth.json` 权限为 `0600` |
+| `apk/device.json` `apk/xuid.json` `apk/accounts.json` | APK 独立设备身份与登录态；`accounts.json` 权限为 `0600`（旧版 `auth.json` 首次运行时自动迁移并删除） |
 
 Profile、Cookie 缓存与设备信息共同构成**一份身份**，三者必须同源于同一个浏览器，因此统一按浏览器分文件保存。从旧版本升级时，`cookies.json` 与 `device-info.json` 会在首次运行时自动改名为 `chrome-*`，登录态不受影响。
 

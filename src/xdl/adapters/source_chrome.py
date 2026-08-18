@@ -67,21 +67,32 @@ def _cancel_requested(cancel) -> bool:
     return bool(cancel())
 
 
-def wipe_browser_profile(profile_dir: str) -> bool:
+def wipe_browser_profile(profile_dir: str, *, port: int | None = None,
+                         browser_name: str = "浏览器") -> bool:
     """删除专用浏览器 Profile 目录；删掉了返回 True。
 
     这是"登出"的关键一步：只清 Cookie 缓存文件是不够的，Profile 里还留着上一
     个账号的会话，下次打开浏览器会直接自动登录回去，根本换不了号。
 
-    只删 xdl 自己创建的专用 Profile，所以先要求目录里存在 Chrome user-data-dir
-    的标志物（`Local State` 或 `Default/`）。少了这道闸，一旦 chrome_profile_dir
-    被误配成家目录之类的路径，这里就会递归删掉用户的真实数据。
+    两道闸，缺一不可：
+
+    - 只删 xdl 自己创建的专用 Profile：要求目录里存在 Chrome user-data-dir
+      的标志物（`Local State` 或 `Default/`）。少了这道闸，一旦
+      chrome_profile_dir 被误配成家目录之类的路径，这里就会递归删掉真实数据。
+    - 传入 ``port`` 时先确认调试端口已无浏览器占用：浏览器仍在运行时删掉
+      Profile，它退出时会把旧登录态重新写回来，登出就白做了。调用方知道端口
+      就该传进来，不能只在上一层检查——直接调用本函数也必须安全。
     """
     import shutil
 
     path = Path(profile_dir or "")
     if not profile_dir or not path.is_dir():
         return False
+    if port is not None and _port_alive(port):
+        raise ConfigError(
+            f"{browser_name} 调试端口 {port} 仍被占用；"
+            "请先关闭该浏览器窗口再清除 Profile，否则登录态会被重新写回。"
+        )
     resolved = path.resolve()
     if resolved.parent == resolved:      # 文件系统根
         raise ConfigError(f"拒绝删除根目录级 Profile 路径: {resolved}")
@@ -728,11 +739,6 @@ class ChromeSource:
         if detail.get("profile_removed"):
             announce(f"已清除专用 {self._browser_name} Profile 中的旧登录态。")
         os.makedirs(self._profile_dir, exist_ok=True)
-        if _port_alive(self._port):
-            raise NetworkError(
-                f"{self._browser_name} 调试端口 {self._port} 已被占用，"
-                "请先关闭占用该端口的浏览器。"
-            )
         announce(f"已打开 {self._browser_name}，请在其中完成登录（扫码或账号密码）；"
                  "检测到登录态后浏览器会自动关闭。")
         args = [self._chrome_path,
@@ -790,13 +796,13 @@ class ChromeSource:
         return [dict(cookie) for cookie in cookies]
 
     def logout(self) -> dict:
-        """登出＝删掉专用 Profile。平台侧没有可调的登出接口，本地凭据即登录态。"""
-        if _port_alive(self._port):
-            raise ConfigError(
-                f"{self._browser_name} 调试端口 {self._port} 仍被占用；"
-                "请先关闭该浏览器窗口再登出，否则 Profile 会被重新写回。"
-            )
-        removed = wipe_browser_profile(self._profile_dir)
+        """登出＝删掉专用 Profile。平台侧没有可调的登出接口，本地凭据即登录态。
+
+        浏览器仍在运行时的拒绝删守卫在 wipe_browser_profile 内部（传入端口即
+        启用），直接调用底层函数也绕不过。
+        """
+        removed = wipe_browser_profile(
+            self._profile_dir, port=self._port, browser_name=self._browser_name)
         self._login_cookies = []
         self._authenticated = None
         return {"profile_removed": removed, "profile_dir": self._profile_dir}

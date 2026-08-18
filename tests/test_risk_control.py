@@ -759,6 +759,18 @@ def test_profile_wipe_refuses_paths_that_are_not_browser_profiles(tmp_path):
     assert wipe_browser_profile(str(tmp_path / "missing")) is False
 
 
+def test_profile_wipe_refuses_while_browser_running(tmp_path, monkeypatch):
+    """守卫必须在底层函数里：绕过 logout 直接调 wipe 也不能删掉在用的 Profile。"""
+    profile = tmp_path / "profile"
+    (profile / "Default").mkdir(parents=True)
+    monkeypatch.setattr("xdl.adapters.source_chrome._port_alive",
+                        lambda _port: True)
+
+    with pytest.raises(ConfigError, match="仍被占用"):
+        wipe_browser_profile(str(profile), port=9222)
+    assert profile.exists()
+
+
 class _RiskSource:
     def __init__(self):
         self.calls = []

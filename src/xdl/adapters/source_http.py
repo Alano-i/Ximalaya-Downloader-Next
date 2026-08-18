@@ -689,9 +689,11 @@ class HttpSource:
             raise ConfigError(
                 "未配置 chrome_fallback；无法在纯 HTTP 后端下交互登录。"
                 "请确认装配根注入了 ChromeSource（见 composition.build_facade）。")
-        if wait_options.pop("reset", False):
-            # 换账号：Cookie 缓存和 Profile 一起清，只清一个都会被旧账号顶回来
-            self.logout()
+        # ChromeSource 的登录总是先清专用 Profile（见其实现 docstring），这里只需
+        # 额外清掉 Cookie 缓存——只清一个都会被旧账号顶回来：清了 Profile 不清缓存，
+        # 下次 open() 会从缓存重新装回旧会话。
+        wait_options.pop("reset", None)  # 向后兼容旧调用方；行为上已无差异
+        clear_cookie_cache(self._cookies_cache_path)
         path = self._chrome_fallback.interactive_login(**wait_options)
         # Cookie 已在登录浏览器仍存活时捕获。这里绝不能为导出而重启 Profile：
         # Playwright 的测试用 Keychain 参数与系统浏览器不同，会在 macOS 上清掉

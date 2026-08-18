@@ -111,30 +111,16 @@ function hideToastRegion() {
 }
 
 function openLogin() {
-  // 已登录时点这个按钮只可能是想换号。直接开浏览器没用：专用 Profile 里旧账号
-  // 的 token 还在，登录轮询会秒命中并把同一个账号再存一遍。
-  if (state.login?.authenticated) return confirmSwitchAccount();
+  // 登录总是先清掉专用 Profile 再开浏览器（见后端 interactive_login），所以
+  // 已登录状态下这里没有"再登录一次"的入口——想换号请先登出。
   startOperation("/api/operations/login");
 }
 
-function confirmSwitchAccount() {
-  const browserName = state.login?.browser_name || "浏览器";
-  openDialog({
-    title: "换账号登录",
-    sub: `将先清除当前账号的登录凭据，再打开 ${browserName} 让你登录另一个账号。`,
-    lines: [
-      `<div class="line"><i></i><span>删除 Cookie 缓存 <strong>${
-        escapeHtml(state.settings?.cookies_cache_path || "")}</strong></span></div>`,
-      `<div class="line"><i></i><span>删除 ${escapeHtml(browserName)} 专用 Profile <strong>${
-        escapeHtml(state.settings?.chrome_profile_dir || "")}</strong></span></div>`,
-      '<div class="line warn"><i></i><span>浏览器打开后请完成登录；'
-        + '检测到登录态会自动关窗保存。中途可点“优雅停止”放弃。</span></div>',
-    ],
-    safeNote: "只影响 XDL 自己的专用 Profile，不会动你日常使用的浏览器。",
-    confirmText: "清除并重新登录",
-    onConfirm: () => startOperation("/api/operations/login",
-                                    { switch_account: true }),
-  });
+// 唯一的登录/登出入口：未登录→登录；已登录→登出确认。想换账号就走
+// 登出（清凭据）→ 再登录（重开浏览器）两步。
+function onLoginEntry() {
+  if (state.login?.authenticated) return confirmLogout();
+  openLogin();
 }
 
 function switchView(view) {
@@ -194,7 +180,7 @@ function renderHeader() {
   if (state.login?.authenticated) {
     loginText.textContent = `${prefix}已保存登录态`;
     loginButton.classList.remove("is-warning");
-    loginButton.title = "点击重新登录";
+    loginButton.title = "点击登出";
   } else if (otherName) {
     loginText.textContent = `${prefix}尚未登录`;
     loginButton.classList.add("is-warning");
@@ -217,25 +203,18 @@ function renderHeader() {
   }
 }
 
-// 登录入口的文案跟着登录态走：已登录时点它只可能是想换号，所以直接写"换账号"，
-// 免得用户以为点了会刷新当前账号的凭据。
+// 登录入口只有一个按钮，跟着登录态走：未登录显示"登录"，已登录显示"登出"。
+// 想换账号 = 登出（清凭据）→ 登录（重开浏览器）两步，没有独立的"换账号"动作。
 function renderLoginEntry(browserName) {
   const button = $("#login-entry-button");
   if (!button) return;
   const authenticated = Boolean(state.login?.authenticated);
   const name = browserName || "浏览器";
-  button.textContent = authenticated ? "换账号" : `${name} 登录`;
+  button.textContent = authenticated ? "登出" : `${name} 登录`;
   button.title = authenticated
-    ? `清除当前登录凭据，再打开 ${name} 登录另一个账号`
+    ? `清除本机保存的登录凭据（Cookie 缓存与 ${name} 专用 Profile）`
     : `下载前请先在 ${name} 中登录喜马拉雅`;
   button.classList.toggle("is-warning", !authenticated);
-
-  // 没登录就没什么可登出的，藏起来省得误点
-  const logout = $("#logout-button");
-  if (!logout) return;
-  logout.classList.toggle("is-hidden", !authenticated);
-  logout.title =
-    `清除本地登录凭据（Cookie 缓存与 ${browserName || "浏览器"} 专用 Profile）`;
 }
 
 function confirmLogout() {
@@ -1080,8 +1059,8 @@ document.addEventListener("click", (event) => {
   const actions = {
     "focus-composer": focusComposer,
     login: openLogin,
+    "login-entry": onLoginEntry,
     logout: confirmLogout,
-    login: () => startOperation("/api/operations/login"),
     resume: () => startOperation("/api/operations/resume"),
     stop: stopOperation,
     "open-downloads": () => openDownloads(),

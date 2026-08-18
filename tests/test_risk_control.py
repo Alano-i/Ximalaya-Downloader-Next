@@ -552,8 +552,12 @@ def test_device_fingerprint_reset_is_disabled_by_default():
 
 
 def _stub_login_launch(monkeypatch, launched=None):
-    """让 interactive_login 走到等待阶段：假进程 + 调试端口先关后开。"""
-    port_states = iter([False, True])
+    """让 interactive_login 走到等待阶段：假进程 + 调试端口先关后开。
+
+    端口探测序列：登录前的占用检查 → logout 清 Profile 前的占用检查 →
+    启动浏览器后的就绪轮询（第二次才就绪）。
+    """
+    port_states = iter([False, False, False, True])
 
     def fake_popen(args, **_kwargs):
         if launched is not None:
@@ -634,11 +638,12 @@ def test_interactive_login_polls_until_token_appears(tmp_path, monkeypatch):
     assert "--remote-debugging-port=9222" in launched["args"]
 
 
-def test_interactive_login_reset_wipes_profile_before_waiting(tmp_path, monkeypatch):
-    """换账号：必须先清 Profile，再等新登录。
+def test_interactive_login_wipes_profile_before_waiting(tmp_path, monkeypatch):
+    """登录总是先清 Profile 再等新登录——不复用旧登录态。
 
     不清的话，Profile 里旧账号的 token 会让第一轮轮询立刻命中——浏览器一闪即
-    关，存下来的还是同一个账号，用户就"换不了号"。
+    关，存下来的还是同一个账号，用户想换号就换不掉。"换账号"因此不是独立分支：
+    先登出再登录即可。
     """
     chrome = tmp_path / "chrome.exe"
     chrome.write_bytes(b"")
@@ -650,7 +655,7 @@ def test_interactive_login_reset_wipes_profile_before_waiting(tmp_path, monkeypa
 
     _patch_login_playwright(monkeypatch, [])
     _forbid_stdin(monkeypatch)
-    port_states = iter([False, False, True])
+    port_states = iter([False, False, False, True])
     monkeypatch.setattr("xdl.adapters.source_chrome._port_alive",
                         lambda _port: next(port_states))
     monkeypatch.setattr("xdl.adapters.source_chrome.time.sleep", lambda _s: None)
@@ -664,35 +669,10 @@ def test_interactive_login_reset_wipes_profile_before_waiting(tmp_path, monkeypa
 
     # 清完 Profile 后没人登录 → 应超时报错，而不是"秒成功"
     with pytest.raises(AuthError, match="等待登录超时"):
-        source.interactive_login(reset=True, wait_timeout=0)
+        source.interactive_login(wait_timeout=0)
 
     assert wiped_before_launch["empty"] is True
     assert not (profile / "Local State").exists()
-
-
-def test_interactive_login_without_reset_warns_about_existing_session(tmp_path,
-                                                                     monkeypatch):
-    """不换号时至少要说清"复用了已有登录态"，不能让用户以为登了新账号。"""
-    chrome = tmp_path / "chrome.exe"
-    chrome.write_bytes(b"")
-    profile = tmp_path / "profile"
-    (profile / "Default").mkdir(parents=True)
-    source = ChromeSource(_Decoder(), str(chrome), str(profile))
-    notes = []
-
-    _patch_login_playwright(monkeypatch, [])
-    _stub_login_launch(monkeypatch)
-    _forbid_stdin(monkeypatch)
-    monkeypatch.setattr(
-        "xdl.adapters.source_chrome._has_persisted_login_cookie",
-        lambda _profile_dir: True, raising=False,
-    )
-
-    with pytest.raises(AuthError, match="等待登录超时"):
-        source.interactive_login(notify=notes.append, wait_timeout=0)
-
-    assert any("已有登录态" in note for note in notes)
-    assert profile.exists()      # 没要求换号就绝不能删 Profile
 
 
 def test_interactive_login_stops_when_cancelled(tmp_path, monkeypatch):

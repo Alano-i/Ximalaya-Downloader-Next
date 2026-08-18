@@ -518,9 +518,10 @@ class PcHttpSource:
             raise ConfigError(
                 "未配置 chrome_fallback；无法在 pc 后端下交互登录。"
                 "请确认装配根注入了 ChromeSource（见 composition.build_facade）。")
-        if wait_options.pop("reset", False):
-            # 换账号：Cookie 缓存和 Profile 一起清，只清一个都会被旧账号顶回来
-            self.logout()
+        # ChromeSource 的登录总是先清专用 Profile（见其实现 docstring），这里只需
+        # 额外清掉 Cookie 缓存——只清一个都会被旧账号顶回来。
+        wait_options.pop("reset", None)  # 向后兼容旧调用方；行为上已无差异
+        clear_cookie_cache(self._cookies_cache_path)
         path = self._chrome_fallback.interactive_login(**wait_options)
         take_cookies = getattr(self._chrome_fallback, "take_login_cookies", None)
         if not callable(take_cookies):

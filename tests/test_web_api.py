@@ -147,7 +147,8 @@ def test_webui_static_shell_is_served():
     assert 'name="experiment_rebirth_rounds"' in page.text
     assert 'id="task-pagination"' in page.text
     assert 'id="login-entry-button"' in page.text
-    assert 'id="logout-button"' in page.text
+    # 登录/登出是同一个按钮（按登录态切换文案），不再有独立登出按钮
+    assert 'id="logout-button"' not in page.text
     assert "window.setInterval(refreshRuntime, 850)" not in script.text
     assert "document.hidden" in script.text
     assert "javascript" in script.headers["content-type"]

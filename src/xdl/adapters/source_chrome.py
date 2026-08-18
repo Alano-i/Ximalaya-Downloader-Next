@@ -710,23 +710,23 @@ class ChromeSource:
         终止浏览器——用户看到的就是"窗口一闪就关"。轮询让 CLI 与 WebUI 共用一
         条路径，用户也不必再切回终端按回车。
 
-        `reset=True` 是"换账号"：先清掉专用 Profile 再开浏览器。不清的话，
-        Profile 里旧账号的 token 会让第一轮轮询立刻命中，浏览器一闪即关，
-        保存下来的还是同一个账号——换号根本换不掉。
+        登录**总是先清掉专用 Profile** 再开浏览器：Profile 里只要留着旧账号的
+        token，第一轮轮询就会立刻命中、浏览器一闪即关，保存下来的还是同一个
+        账号——用户想换号时根本换不掉。"换账号"因此不再是一个独立分支：先登出
+        （删 Profile）再登录（重新扫码）即可。`reset` 参数保留仅为向后兼容
+        现有调用方，行为上已无差异。
         """
         announce = notify or print
         self._login_cookies = []
         self._require_chrome()
-        if reset:
-            detail = self.logout()
-            if detail.get("profile_removed"):
-                announce(f"已清除专用 {self._browser_name} Profile 中的旧登录态。")
-        elif _has_persisted_login_cookie(self._profile_dir):
-            # 不吭声地"复用"会被误认为登录成功，而用户其实是想换号
-            announce(
-                f"专用 {self._browser_name} Profile 中已有登录态，将直接复用；"
-                "要换成另一个账号，请使用“换账号”。"
+        if _port_alive(self._port):
+            raise NetworkError(
+                f"{self._browser_name} 调试端口 {self._port} 已被占用，"
+                "请先关闭占用该端口的浏览器。"
             )
+        detail = self.logout()
+        if detail.get("profile_removed"):
+            announce(f"已清除专用 {self._browser_name} Profile 中的旧登录态。")
         os.makedirs(self._profile_dir, exist_ok=True)
         if _port_alive(self._port):
             raise NetworkError(

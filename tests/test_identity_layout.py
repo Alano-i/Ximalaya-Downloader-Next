@@ -233,3 +233,51 @@ def test_login_status_ignores_other_browser_for_custom_path(home):
         Settings(browser="edge", cookies_cache_path=str(home / "mine.json")))
 
     assert status["other_browser_authenticated"] is None
+
+
+# ---- chrome 后端的登录态判定（Profile Cookie DB，而非缓存文件） ----
+
+def _write_profile_token(profile_dir) -> None:
+    """在专用 Profile 的 Cookie DB 里写入一条登录 token（模拟已登录）。"""
+    import sqlite3
+    db_dir = profile_dir / "Default" / "Network"
+    db_dir.mkdir(parents=True)
+    with sqlite3.connect(db_dir / "Cookies") as conn:
+        conn.execute(
+            "CREATE TABLE cookies (name TEXT, encrypted_value BLOB, value TEXT)")
+        conn.execute("INSERT INTO cookies VALUES (?, ?, ?)",
+                     ("1&_token", b"encrypted-token", ""))
+
+
+def test_chrome_backend_reads_login_state_from_profile(home):
+    """chrome 后端不写 Cookie 缓存文件；登录态必须看专用 Profile 的 Cookie DB。
+
+    否则前端恒报未登录：登出入口被藏掉，"换账号"走成普通登录秒命中旧 token。
+    """
+    profile = home / "chrome-profile"
+    _write_profile_token(profile)
+
+    status = login_cache_status(Settings(source_backend="chrome"))
+
+    assert status["authenticated"] is True
+
+
+def test_chrome_backend_without_profile_token_reports_logged_out(home):
+    """chrome 后端 + 空 Profile：即使缓存文件里有 token 也不算登录。
+
+    缓存文件对 chrome 后端没有约束力——下载走 Profile，不走缓存。
+    """
+    _write_login_cookies(home / "chrome-cookies.json")
+
+    status = login_cache_status(Settings(source_backend="chrome"))
+
+    assert status["authenticated"] is False
+
+
+def test_http_backend_still_reads_cache_file(home):
+    """http/pc 后端维持原行为：登录态看 Cookie 缓存文件。"""
+    _write_login_cookies(home / "chrome-cookies.json")
+
+    status = login_cache_status(Settings(source_backend="http"))
+
+    assert status["authenticated"] is True
